@@ -1,7 +1,7 @@
 {
   "name": "sni-recon",
-  "version": "1.0.0",
-  "description": "Recon tool for TLS nodes used as Reality/VLESS SNI masks: whitelist detection, certificate genuineness, and transparent-forward verification.",
+  "version": "1.1.0",
+  "description": "Recon tool for TLS nodes used as Reality/VLESS SNI masks: whitelist detection, certificate genuineness, transparent-forward verification. English and Russian reports.",
   "type": "module",
   "bin": {
     "sni-recon": "./bin/sni-recon.js"

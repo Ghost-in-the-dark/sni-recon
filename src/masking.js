@@ -8,7 +8,12 @@
 // node was configured, and it is visible from outside through three independent channels:
 // the trustworthiness of the certificate, the operator behind the address, and whether
 // the byte stream actually originates from the real site.
+//
+// Evidence is recorded as message values (key + parameters), not as English prose, so the
+// same verdict renders in any shipped locale. Verdicts and method ids are stable machine
+// identifiers and are never translated.
 import { sameOperator, describeHoster } from './hoster.js';
+import { msg } from './messages.js';
 
 export const METHOD = {
   FORGED: 'forged-certificate',
@@ -60,13 +65,11 @@ export function evaluateMasking(input) {
       ev(
         'untrusted-certificate-for-foreign-domain',
         3,
-        'the node serves ' +
-          forgedNames.length +
-          ' name(s) with a certificate that does not chain to a public trust store (' +
-          forgedNames.slice(0, 3).join(', ') +
-          '); issuer "' +
-          ((example.leaf && example.leaf.issuerCn) || 'unknown') +
-          '"'
+        msg('evidence.untrusted-certificate-for-foreign-domain', {
+          count: forgedNames.length,
+          names: forgedNames.slice(0, 3).join(', '),
+          issuer: (example.leaf && example.leaf.issuerCn) || 'unknown'
+        })
       )
     );
   }
@@ -82,27 +85,17 @@ export function evaluateMasking(input) {
       ev(
         'catch-all-certificate-is-upstream',
         0,
-        'the node serves one certificate for every name, but so does the real service (' +
-          (refControls.name || 'the reference host') +
-          ' answers an undeclared name with the same certificate) \u2014 this is CDN edge behaviour, not masking'
+        msg('evidence.catch-all-certificate-is-upstream', {
+          name: (refControls && refControls.name) || 'the reference host'
+        })
       )
     );
   } else if (generic) {
-    evidence.push(
-      ev(
-        'single-certificate-for-all-names',
-        2,
-        'the same certificate is returned for every SNI tested, including names the node cannot own \u2014 the signature of a catch-all reverse proxy rather than a real service'
-      )
-    );
+    evidence.push(ev('single-certificate-for-all-names', 2, msg('evidence.single-certificate-for-all-names')));
   }
   if (controls.randomName && controls.randomName.ok) {
     evidence.push(
-      ev(
-        'accepts-undeclared-names',
-        1,
-        'a random undeclared name (' + controls.randomName.name + ') completes a handshake, so name-based routing is not enforced'
-      )
+      ev('accepts-undeclared-names', 1, msg('evidence.accepts-undeclared-names', { name: controls.randomName.name }))
     );
   }
 
@@ -124,9 +117,7 @@ export function evaluateMasking(input) {
       ev(
         'content-served-from-elsewhere',
         2,
-        'the node relays byte-identical content for ' +
-          (c.name ? '"' + c.name + '"' : 'the whitelisted name') +
-          ' while the address is not operated by the domain\u2019s own provider'
+        msg('evidence.content-served-from-elsewhere', { name: c.name || '' })
       )
     );
   } else if (generic && !genericIsUpstream) {
@@ -144,22 +135,18 @@ export function evaluateMasking(input) {
         ev(
           'operator-mismatch',
           2,
-          'the node runs on ' +
-            describeHoster(nodeHoster) +
-            ', while the real service runs on ' +
-            describeHoster(referenceHoster) +
-            ' \u2014 different operators'
+          msg('evidence.operator-mismatch', { node: nodeHoster, reference: referenceHoster })
         )
       );
     } else if (sameOp === true) {
       evidence.push(
-        ev('operator-match', -2, 'node and the real service are operated by the same organisation (' + describeHoster(nodeHoster) + ')')
+        ev('operator-match', -2, msg('evidence.operator-match', { node: nodeHoster }))
       );
     }
   }
   if (nodeHoster && nodeHoster.ok && nodeHoster.hosting === true) {
     evidence.push(
-      ev('node-is-datacenter', 1, 'the address belongs to a hosting/datacenter provider, not to the domain\u2019s own network (' + describeHoster(nodeHoster) + ')')
+      ev('node-is-datacenter', 1, msg('evidence.node-is-datacenter', { node: nodeHoster }))
     );
   }
 
@@ -169,7 +156,7 @@ export function evaluateMasking(input) {
     const viaG = best.via.keyExchange ? best.via.keyExchange.name : null;
     if (refG && viaG && refG !== viaG) {
       evidence.push(
-        ev('tls-parameters-differ', 1, 'the node negotiates a different key exchange group (' + viaG + ') than the real service (' + refG + ')')
+        ev('tls-parameters-differ', 1, msg('evidence.tls-parameters-differ', { via: viaG, reference: refG }))
       );
     }
     const refFp = best.reference.leafFingerprint256;
@@ -180,9 +167,7 @@ export function evaluateMasking(input) {
         ev(
           'certificate-differs-from-real-site',
           anchored ? 1 : 3,
-          anchored
-            ? 'the certificate is validly issued but is not the one the site serves on its own infrastructure'
-            : 'the certificate presented is not the one the real service serves, and it is not publicly trusted'
+          msg(anchored ? 'evidence.certificate-differs-anchored' : 'evidence.certificate-differs-untrusted')
         )
       );
     }
@@ -232,14 +217,13 @@ export function evaluateMasking(input) {
     masking = weight >= 3;
   }
 
-  const headline = headlineFor(verdict, method, confidence);
-
   return {
     masking: masking,
     method: method,
     confidence: confidence,
     verdict: verdict,
-    headline: headline,
+    // Message value, not a string: the renderer owns the wording and the language.
+    headline: msg('masking.headline.' + verdict),
     weight: weight,
     positiveSignals: positive.length,
     sameOperator: sameOp,
@@ -267,30 +251,21 @@ export function evaluateMasking(input) {
   };
 }
 
-function headlineFor(verdict, method, confidence) {
-  switch (verdict) {
-    case 'identified-by-forged-certificate':
-      return 'Hoster-level domain masking: the node mints certificates for a domain it does not own.';
-    case 'identified-by-transparent-forward':
-      return 'Hoster-level domain masking: the node relays for a domain it does not own.';
-    case 'identified-by-generic-certificate':
-      return 'Hoster-level domain masking: one catch-all certificate is served for every name.';
-    case 'identified-by-content-substitution':
-      return 'Hoster-level domain masking: the node serves content that does not match the real service while running on unrelated infrastructure.';
-    case 'possible-forward-operator-unknown':
-      return 'Possible domain masking: the node relays for another domain, but the operator could not be identified.';
-    case 'genuine-front':
-      return 'No masking detected: the node behaves as the domain\u2019s own infrastructure.';
-    case 'suspicious':
-      return 'Masking indicators present, but below the confidence threshold for a verdict.';
-    default:
-      return 'Inconclusive: not enough signals to judge whether a domain is being masked.';
-  }
+/** Compact one-line summary used by the TUI banner and the text report. */
+export function maskingLine(m, t) {
+  if (!m) return t ? t('misc.unknown') : 'unknown';
+  const tag = m.masking
+    ? t
+      ? t('masking.detected')
+      : 'masking'
+    : m.verdict === 'genuine-front'
+    ? t
+      ? t('masking.notDetected')
+      : 'no masking'
+    : t
+    ? t('masking.inconclusive')
+    : 'unclear';
+  return tag + ' · ' + (t ? t('method.' + m.method) : m.method) + ' · ' + (t ? t('confidence.' + m.confidence) : m.confidence);
 }
 
-/** Compact one-line summary used by the TUI banner and the text report. */
-export function maskingLine(m) {
-  if (!m) return 'masking: unknown';
-  const tag = m.masking ? 'MASKING DETECTED' : m.verdict === 'genuine-front' ? 'no masking' : 'unclear';
-  return tag + ' \u00b7 ' + m.method + ' \u00b7 confidence ' + m.confidence;
-}
+export default { evaluateMasking, maskingLine, METHOD };

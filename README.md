@@ -10,6 +10,8 @@ Given one or more addresses, it answers three questions that are usually guessed
 
 Built to correct a specific failure mode: a node that whitelists its SNI will reject the probe name that common scanners use, and get reported as having no valid certificate when it is in fact perfectly healthy.
 
+Reports and interface are available in **English** and **Russian** (`--lang ru`).
+
 ---
 
 ## Why the usual scan misses
@@ -39,11 +41,11 @@ npm link
 sni-recon --help
 ```
 
-Verify the installation:
+Verify the installation (the fixture step needs `openssl` in `PATH`):
 
 ```bash
-npm test          # 17 unit tests
-sni-recon selftest  # 16 end-to-end checks against local fake nodes
+npm test              # unit tests
+sni-recon selftest    # end-to-end checks against local fake nodes
 ```
 
 ---
@@ -61,6 +63,21 @@ sni-recon 203.0.113.7
 ```
 
 The interface draws a live frame in the terminal: operator, progress through the whitelist, and each candidate as its certificate and forwarding are resolved. Press `q` to detach the UI — the scan keeps running and the report is still written.
+
+### Language
+
+The locale comes from the flag first, then the environment, then English:
+
+```bash
+sni-recon 203.0.113.7 --lang ru      # or -L ru
+LANG=ru_RU.UTF-8 sni-recon 203.0.113.7
+```
+
+`LC_ALL` and `LC_MESSAGES` take precedence over `LANG`, as POSIX specifies. An unshipped locale such as `de_DE` falls back to English rather than guessing.
+
+The report carries the language it was rendered in by design: the engine stores findings as *structured values*, not as finished sentences, so a JSON consumer never has to parse prose to act on a signal.
+
+### More examples
 
 Quick pass with a 20-name corpus:
 
@@ -115,12 +132,47 @@ sni-recon 203.0.113.7 --server-names www.example.com --repeat 10
 | `--no-reference` | Discovery only; skip comparison against the real site |
 | `--no-deep` | Map the whitelist only |
 | `--no-hoster` | Skip operator lookup and the masking verdict |
+| `--no-follow` | Do not follow redirects |
+| `--no-operator-details` | Blank the operator name, ASN and location in the report |
+| `-L, --lang code` | Report and interface language (`en`, `ru`) |
 | `--tui` / `--no-tui` | Force the interactive UI on or off |
 | `--format md\|json\|text` | Output format (default md) |
 | `--out file\|-` | Write the report to a file |
 | `--list-candidates` | Print the built-in corpus |
 
 Exit codes: `0` success, `1` node unreachable or no cover name found, `2` usage error.
+
+### Publishing a report without naming your provider
+
+A scan report names the hosting operator behind the node. That is useful to you and sensitive to everyone else, so it can be removed without losing anything that matters:
+
+```bash
+sni-recon 203.0.113.7 --no-operator-details --out public-report.md
+```
+
+Redaction is applied **after** the analysis and **before** rendering, so it can never change a conclusion — it only affects how much of the infrastructure is disclosed. Certificate verdicts, whitelist mapping and forward comparison are all independent of who runs the box; the datacenter flag survives, because the masking verdict leans on it. A note in the report records that details were withheld, so a reader is not misled into thinking the lookup simply failed.
+
+---
+
+## How the report is laid out
+
+The reader is told the **answer first**:
+
+1. **Conclusion** — the recommended SNI, a ready-to-paste configuration, the two or three facts that justify it, and the masking verdict with its evidence table.
+2. **Candidate ranking** — every name, scored.
+3. **Notes and rejected names.**
+4. **Appendix** — node identity, per-name detail, and a side-by-side comparison with the real site.
+5. **Method and caveats** — identical in every report, so it sits at the end.
+
+The comparison is a three-column table rather than two paragraphs the reader has to diff by eye:
+
+| Check | Through node | Real site | Result |
+| --- | --- | --- | --- |
+| HTTP status | 200 | 200 | match |
+| Body size | 51234 B | 51234 B | match |
+| Body SHA-256 | `3F2A9C10E4B7…` | `3F2A9C10E4B7…` | identical |
+| Time to first byte | 191.5 ms | 142.5 ms | — |
+| Leaf certificate | `A1B2C3D4E5F6…` | `A1B2C3D4E5F6…` | identical |
 
 ---
 
@@ -132,13 +184,13 @@ The question "is this host masking a domain?" has no single answer, so it is res
 
 The presented chain is verified **offline** against Node's bundled trust store: validity windows, signature links between each pair of certificates, and a trusted anchor at the top.
 
-A node that mints its own certificate for a popular hostname fails this immediately. The verdict is `identified-by-forged-certificate` at **high** confidence, because no legitimate reason exists to serve a self-issued certificate for `github.com`.
+A node that mints its own certificate for a popular hostname fails this immediately. The verdict is `identified-by-forged-certificate` at **high** confidence, because no legitimate reason exists to serve a self-issued certificate for a name the node does not own.
 
 This is the strongest signal available, and it cannot be produced by a handshake test alone — the handshake succeeds, TLS looks fine, and only chain verification exposes it.
 
 ### 2. Operator mismatch
 
-The address is resolved to an ASN and organisation through keyless services (ip-api.com and RDAP), as is the address of the real service. If the node runs on Ihor Hosting in Helsinki while `jetbrains.com` runs on Amazon, that is a fact about the network, not an inference.
+The address is resolved to an ASN and organisation through keyless services (ip-api.com and RDAP), as is the address of the real service. A node run by a hosting provider while the cover domain runs on a CDN is a fact about the network, not an inference.
 
 When the operator matches *and* the certificate is honestly issued, the node is reported as `genuine-front` — it is simply the service's own infrastructure, and flagging it would be a false positive on every legitimate front-end.
 
@@ -165,6 +217,8 @@ That behaviour is a property of the upstream, and is reported as such.
 
 ### Verdicts
 
+Verdict and method ids are stable machine identifiers and are never translated; only their labels are.
+
 | Verdict | Meaning |
 | --- | --- |
 | `identified-by-forged-certificate` | Certificates minted for a domain the node does not own |
@@ -176,13 +230,11 @@ That behaviour is a property of the upstream, and is reported as such.
 
 ---
 
-## Output
-
-The default report is Markdown, and covers the verdict, the recommended configuration, the masking analysis with its evidence table, node identity, a ranked candidate table, and per-candidate detail.
+## Scoring
 
 The ranking scores each name out of 100 from weighted components: chain verification (+35 / −25), fingerprint match against the real site (±20), byte-identical forwarding (+25), handshake stability, certificate determinism, remaining validity, and key-exchange parity.
 
-Grades: `excellent` (80+), `good` (60+), `fair` (40+), `poor`.
+Grades are stable ids — `excellent` (80+), `good` (60+), `fair` (40+), `poor` — and are rendered in the report's language.
 
 ---
 
@@ -216,6 +268,25 @@ Resolution uses DNS-over-HTTPS first, so a local fake-IP resolver cannot silentl
 **A certificate that does not cover the name is not always hostile.** Some hosts legitimately serve a default certificate for unknown names.
 
 **Reachability from one vantage point says nothing about blocking elsewhere.**
+
+---
+
+## Adding a language
+
+Copy `src/i18n/en.js`, translate the values, and register the catalogue in `src/i18n/index.js`. The test suite compares key sets across catalogues and fails on any missing key, so a partial translation cannot ship silently. It also renders a full report in every shipped locale and asserts that no raw message key leaks into the output.
+
+Message values are structured: `msg('evidence.operator-mismatch', { node, reference })` records *what happened* and the renderer decides how to say it. That is what makes a scan re-renderable in another language without repeating it.
+
+---
+
+## Tests
+
+```bash
+npm test           # unit tests
+sni-recon selftest # end-to-end against local fake masking nodes
+```
+
+The self test stands up three loopback listeners — one presenting a genuine certificate, one minting a forged one, one serving a catch-all — and asserts the verdicts, the scoring order, per-locale rendering, redaction, and the absence of raw keys in output. Hoster fixtures in the tests are fictional (`AS64500 EXAMPLE HOSTING LTD`); a guard test fails the build if a real provider's identity ever appears in the repository.
 
 ---
 

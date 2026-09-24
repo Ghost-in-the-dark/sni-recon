@@ -1,311 +1,548 @@
 // Report renderers: Markdown, plain text and JSON.
-// Pure functions over the analysis object, so output is reproducible and diffable.
-import { pad, padL, clip, round, shortFp } from './util.js';
+//
+// Pure functions over the analysis object and a translator, so output is reproducible and
+// diffable, and the same scan can be re-rendered in another locale without re-running it.
+//
+// Layout principle: the reader is told the ANSWER first. A conclusion block with the
+// recommended name and its configuration sits at the top; the evidence that supports it
+// sits directly under the same heading; the methodology, caveats and per-name appendix
+// are pushed to the end, because they are the same in every report and are read once.
+import { pad, padL, clip, shortFp } from './util.js';
+import { localizer, DEFAULT_LOCALE } from './i18n/index.js';
+import { renderMsg, renderList } from './messages.js';
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 
-const FENCE = String.fromCharCode(96) + String.fromCharCode(96) + String.fromCharCode(96);
+const FENCE = String.fromCharCode(96).repeat(3);
 const TICK = String.fromCharCode(96);
+
+/** Resolve a translator argument, so every renderer works with or without one. */
+function translator(t) {
+  if (typeof t === 'function') return t;
+  if (t && typeof t.locale === 'string') return t;
+  return localizer(DEFAULT_LOCALE);
+}
 
 function v(x, fallback) {
   return x === null || x === undefined || x === '' ? (fallback === undefined ? 'n/a' : fallback) : x;
-}
-
-function yn(b) {
-  return b ? 'yes' : 'no';
 }
 
 function code(s) {
   return TICK + s + TICK;
 }
 
-function certVerdict(c) {
-  const ver = c && c.verified;
-  if (!ver) return 'not inspected';
-  if (ver.ok) return 'genuine (chain verified)';
-  if (!ver.anchored) return 'lookalike (not publicly trusted)';
-  return 'chain invalid';
+/** Strip Markdown emphasis for the plain-text renderer. */
+function plain(s) {
+  return String(s === undefined || s === null ? '' : s).replace(/\*\*/g, '');
 }
 
-function forwardVerdict(c) {
+/** Capitalise a translated label that stands alone in a table cell. */
+function cap(s) {
+  const str = String(s === undefined || s === null ? '' : s);
+  return str ? str.charAt(0).toUpperCase() + str.slice(1) : str;
+}
+
+function gradeWord(t, grade) {
+  return grade ? t('grade.' + grade) : grade;
+}
+
+function certVerdict(c, t) {
+  const ver = c && c.verified;
+  if (!ver) return t('cert.notInspected');
+  if (ver.ok) return t('cert.genuine');
+  if (!ver.anchored) return t('cert.lookalike');
+  return t('cert.invalid');
+}
+
+function forwardVerdict(c, t) {
   const f = c && c.forward;
   if (!f || !f.attempted) return '\u2014';
-  if (f.error) return 'failed';
-  if (f.identityMatch === true) return 'identical';
-  if (f.comparable) return 'comparable';
-  return 'differs';
+  if (f.error) return t('forward.failed');
+  if (f.identityMatch === true) return t('forward.identical');
+  if (f.comparable) return t('forward.comparable');
+  return t('forward.differs');
 }
 
-function summaryLine(result) {
-  if (!result.reachable) return 'Node did not complete a TLS handshake.';
-  if (!result.best) return 'No accepted candidate names found.';
-  return 'Best cover: ' + result.best.name + ' (' + result.best.score + '/100, ' + result.best.grade + ').';
+/** Dependencies handed to message rendering: a translator plus hoster composition. */
+function deps(t) {
+  return { t: t };
 }
 
-export function renderMarkdown(result) {
-  if (result.nodes) return result.nodes.map(renderMarkdown).join('\n\n---\n\n');
+/** Format an ISO timestamp in the locale's own convention, degrading to the raw value. */
+function formatDate(iso, locale) {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return v(iso);
+  try {
+    return new Intl.DateTimeFormat(locale === 'ru' ? 'ru-RU' : 'en-GB', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: 'UTC'
+    }).format(d) + ' UTC';
+  } catch (e) {
+    return d.toISOString();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Markdown
+// ---------------------------------------------------------------------------
+
+export function renderMarkdown(result, tIn) {
+  const t = translator(tIn);
+  if (result.nodes) {
+    return result.nodes
+      .map(function (r) {
+        return renderMarkdown(r, t);
+      })
+      .join('\n\n---\n\n');
+  }
   const L = [];
   const n = result.node;
-  L.push('# SNI cover analysis \u2014 ' + n.address + ':' + n.port);
+  L.push('# ' + t('doc.title', { address: n.address, port: n.port }));
   L.push('');
-  L.push('Generated ' + v(result.finishedAt, result.startedAt) + ' \u00b7 sni-recon v' + VERSION);
-  L.push('');
-  L.push('> ' + summaryLine(result));
+  L.push(t('doc.generated', { at: formatDate(v(result.finishedAt, result.startedAt), t.locale), version: VERSION }));
   L.push('');
 
   if (!result.reachable) {
-    L.push('## Result');
+    L.push('## ' + t('result.heading'));
     L.push('');
-    L.push('No TLS handshake completed, with or without SNI.');
+    L.push(t('result.noHandshake'));
     L.push('');
-    L.push(result.summary && result.summary.message ? result.summary.message : '');
+    L.push(renderMsg(t, result.summary && result.summary.message, deps(t)));
     L.push('');
+    appendMethodAndCaveats(L, t);
     return L.join('\n');
   }
 
-  // Verdict
-  L.push('## Verdict');
+  // --- Conclusion: the answer, and the evidence for it, under one heading ----
+  L.push('## ' + t('conclusion.heading'));
   L.push('');
   if (result.best) {
+    const weak = result.best.grade === 'poor';
+    // A name that scored poorly is not a recommendation. Handing the reader a
+    // ready-to-paste configuration for it would be actively misleading, so the block is
+    // replaced by an explicit statement that nothing here is usable.
+    L.push(
+      weak
+        ? t('conclusion.bestWeak', { name: result.best.name, score: result.best.score, grade: gradeWord(t, result.best.grade) })
+        : t('conclusion.best', { name: result.best.name, score: result.best.score, grade: gradeWord(t, result.best.grade) })
+    );
+    L.push('');
+    for (const line of conclusionEvidence(result, t)) L.push('- ' + line);
+    L.push('');
+    if (weak) {
+      L.push('> ' + t('conclusion.warning'));
+      L.push('');
+    }
+    if (!weak) {
+      L.push('### ' + t('conclusion.config'));
+      L.push('');
+      L.push(FENCE + 'json');
+      L.push('"serverNames": [' + JSON.stringify(result.best.name) + '],');
+      L.push('"dest": ' + JSON.stringify(result.best.dest));
+      L.push(FENCE);
+      L.push('');
+      L.push(t('conclusion.configNote', { code: code('dest') }));
+      L.push('');
+    }
+    L.push('| ' + t('table.field') + ' | ' + t('table.value') + ' |');
+    L.push('| --- | --- |');
     const bc = (result.candidates || []).find(function (c) {
       return c.name === result.best.name;
     });
-    L.push('| Field | Value |');
-    L.push('| --- | --- |');
-    L.push('| Recommended SNI | ' + code(result.best.name) + ' |');
-    L.push('| Score | ' + result.best.score + ' / 100 (' + result.best.grade + ') |');
-    if (bc && bc.stability) L.push('| Handshake success | ' + bc.stability.ok + '/' + bc.stability.attempts + ' |');
-    if (bc && bc.stability && bc.stability.latencyMs.median != null) L.push('| Median handshake latency | ' + bc.stability.latencyMs.median + ' ms |');
-    if (bc && bc.validityDaysLeft != null) L.push('| Certificate valid for | ' + bc.validityDaysLeft + ' days |');
-    L.push('| Certificate | ' + certVerdict(bc) + ' |');
-    L.push('| Forwarding | ' + forwardVerdict(bc) + ' |');
-    L.push('');
-    L.push('### Configuration');
-    L.push('');
-    L.push(FENCE + 'json');
-    L.push('"serverNames": [' + JSON.stringify(result.best.name) + '],');
-    L.push('"dest": ' + JSON.stringify(result.best.dest));
-    L.push(FENCE);
-    L.push('');
-    L.push('Keep ' + code('dest') + ' as a hostname rather than a literal IP so the node resolves it itself. The same name must be present in the client configuration.');
+    L.push('| ' + t('verdict.score') + ' | ' + result.best.score + ' / 100 (' + gradeWord(t, result.best.grade) + ') |');
+    if (bc && bc.stability) {
+      L.push('| ' + t('verdict.handshakes') + ' | ' + bc.stability.ok + '/' + bc.stability.attempts + ' |');
+    }
+    if (bc && bc.stability && bc.stability.latencyMs.median != null) {
+      L.push('| ' + t('verdict.medianLatency') + ' | ' + bc.stability.latencyMs.median + ' ms |');
+    }
+    if (bc && bc.validityDaysLeft != null) {
+      L.push('| ' + t('verdict.validFor') + ' | ' + bc.validityDaysLeft + ' ' + t('verdict.days') + ' |');
+    }
+    L.push('| ' + t('verdict.certificate') + ' | ' + certVerdict(bc, t) + ' |');
+    L.push('| ' + t('verdict.forwarding') + ' | ' + forwardVerdict(bc, t) + ' |');
     L.push('');
   } else {
-    L.push('No usable cover name was found on this node.');
+    L.push(t('conclusion.noName'));
+    L.push('');
+    L.push(renderMsg(t, result.summary && result.summary.message, deps(t)));
     L.push('');
   }
 
-  // Masking
+  // Masking verdict belongs with the conclusion, not in an appendix: it is a finding.
   const m = result.masking;
   if (m) {
-    L.push('## Hoster-level domain masking');
+    L.push('### ' + t('masking.heading'));
     L.push('');
-    L.push('**' + (m.masking ? 'Masking detected' : m.verdict === 'genuine-front' ? 'No masking detected' : 'Inconclusive') + '** \u2014 ' + m.headline);
+    const tag = m.masking ? t('masking.detected') : m.verdict === 'genuine-front' ? t('masking.notDetected') : t('masking.inconclusive');
+    L.push('**' + tag + '** — ' + renderMsg(t, m.headline, deps(t)));
     L.push('');
-    L.push('| Field | Value |');
+    L.push('| ' + t('table.field') + ' | ' + t('table.value') + ' |');
     L.push('| --- | --- |');
-    L.push('| Verdict | ' + code(m.verdict) + ' |');
-    L.push('| Method | ' + code(m.method) + ' |');
-    L.push('| Confidence | ' + m.confidence + ' |');
-    L.push('| Signal weight | ' + m.weight + ' |');
+    L.push('| ' + t('masking.verdict') + ' | ' + code(cap(t('verdict.' + m.verdict))) + ' |');
+    L.push('| ' + t('masking.method') + ' | ' + code(cap(t('method.' + m.method))) + ' |');
+    L.push('| ' + t('masking.confidence') + ' | ' + t('confidence.' + m.confidence) + ' |');
+    L.push('| ' + t('masking.weight') + ' | ' + m.weight + ' |');
     if (m.nodeHoster) {
-      L.push('| Node operator | ' + v(m.nodeHoster.description) + ' |');
-      L.push('| Datacenter address | ' + yn(m.nodeHoster.hosting) + ' |');
+      L.push('| ' + t('masking.nodeOperator') + ' | ' + v(m.nodeHoster.description) + ' |');
+      L.push('| ' + t('masking.datacenter') + ' | ' + t(m.nodeHoster.hosting ? 'misc.yes' : 'misc.no') + ' |');
     }
-    if (m.referenceHoster) L.push('| Real service operator | ' + v(m.referenceHoster.description) + ' |');
-    if (m.sameOperator !== null && m.sameOperator !== undefined) L.push('| Same operator | ' + yn(m.sameOperator) + ' |');
+    if (m.referenceHoster) L.push('| ' + t('masking.referenceOperator') + ' | ' + v(m.referenceHoster.description) + ' |');
+    if (m.sameOperator !== null && m.sameOperator !== undefined) {
+      L.push('| ' + t('masking.sameOperator') + ' | ' + t(m.sameOperator ? 'misc.yes' : 'misc.no') + ' |');
+    }
     L.push('');
     if (m.evidence && m.evidence.length) {
-      L.push('| Evidence | Weight | Detail |');
+      L.push('| ' + t('masking.evidence') + ' | ' + t('masking.evidenceWeight') + ' | ' + t('masking.evidenceDetail') + ' |');
       L.push('| --- | --- | --- |');
       for (const e of m.evidence) {
-        L.push('| ' + code(e.signal) + ' | ' + (e.weight > 0 ? '+' : '') + e.weight + ' | ' + e.detail + ' |');
+        L.push('| ' + code(e.signal) + ' | ' + (e.weight > 0 ? '+' : '') + e.weight + ' | ' + renderMsg(t, e.detail, deps(t)) + ' |');
       }
       L.push('');
     }
   }
 
-  // Node identity
-  const c = result.controls || {};
-  const wl = result.whitelist || {};
-  L.push('## Node identity');
+  // --- Ranking --------------------------------------------------------------
+  L.push('## ' + t('ranking.heading'));
   L.push('');
-  L.push('| Probe | Handshake | Certificate CN | Anchored |');
-  L.push('| --- | --- | --- | --- |');
-  L.push('| no SNI | ' + (c.noSni && c.noSni.ok ? 'ok' : 'failed') + ' | ' + v(c.noSni && c.noSni.leafCn, '\u2014') + ' | ' + (c.noSni ? yn(c.noSni.anchored) : '\u2014') + ' |');
-  L.push('| ' + code(v(c.strictName && c.strictName.name, 'invalid2.invalid')) + ' | ' + (c.strictName && c.strictName.ok ? 'accepted' : 'rejected') + ' | ' + v(c.strictName && c.strictName.leafCn, '\u2014') + ' | \u2014 |');
-  L.push('| random .invalid name | ' + (c.randomName && c.randomName.ok ? 'accepted' : 'rejected') + ' | ' + v(c.randomName && c.randomName.leafCn, '\u2014') + ' | \u2014 |');
-  L.push('');
-  L.push('| Property | Value |');
-  L.push('| --- | --- |');
-  L.push('| Names tested | ' + wl.tested + ' |');
-  L.push('| Names accepted | ' + wl.accepted + ' |');
-  L.push('| Distinct certificates seen | ' + v(wl.distinctIdentities) + ' |');
-  L.push('| Single certificate for every SNI | ' + yn(wl.genericIdentity) + ' |');
-  L.push('| Accepts arbitrary undeclared names | ' + yn(wl.randomNameAccepted) + ' |');
-  L.push('| Compatible with a strict invalid2.invalid scan | ' + yn(wl.realitlscannerCompatible) + ' |');
-  L.push('');
-
-  // Ranking
-  L.push('## Candidate ranking');
-  L.push('');
-  L.push('| # | Name | Group | Score | Grade | Certificate | Forward | Median ms |');
+  L.push('| ' + t('ranking.rank') + ' | ' + t('ranking.name') + ' | ' + t('ranking.group') + ' | ' + t('ranking.score') + ' | ' + t('ranking.grade') + ' | ' + t('ranking.certificate') + ' | ' + t('ranking.forward') + ' | ' + t('ranking.medianMs') + ' |');
   L.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
   const rows = result.candidates || [];
   for (let i = 0; i < rows.length; i++) {
     const x = rows[i];
     const ms = x.stability && x.stability.latencyMs ? x.stability.latencyMs.median : null;
-    L.push('| ' + (i + 1) + ' | ' + code(x.name) + ' | ' + v(x.group) + ' | ' + v(x.score) + ' | ' + v(x.grade) + ' | ' + certVerdict(x) + ' | ' + forwardVerdict(x) + ' | ' + v(ms) + ' |');
+    L.push(
+      '| ' + (i + 1) +
+      ' | ' + code(x.name) +
+      ' | ' + v(x.group) +
+      ' | ' + v(x.score) +
+      ' | ' + v(gradeWord(t, x.grade)) +
+      ' | ' + certVerdict(x, t) +
+      ' | ' + forwardVerdict(x, t) +
+      ' | ' + v(ms) + ' |'
+    );
   }
   L.push('');
 
-  // Detail
-  L.push('## Detail');
-  L.push('');
-  const deep = rows.filter(function (x) {
-    return x.stability;
-  });
-  if (!deep.length) {
-    L.push('Run without ' + code('--no-deep') + ' to collect certificate, latency and forward-verification detail.');
+  if (result.summary && result.summary.notes && result.summary.notes.length) {
+    L.push('## ' + t('notes.heading'));
+    L.push('');
+    for (const note of renderList(t, result.summary.notes, deps(t))) L.push('- ' + note);
     L.push('');
   }
-  for (let i = 0; i < deep.length; i++) {
-    const x = deep[i];
-    L.push('### ' + (i + 1) + '. ' + code(x.name) + ' \u2014 ' + x.score + '/100 (' + x.grade + ')');
+  if (result.whitelist && result.whitelist.rejectedSample && result.whitelist.rejectedSample.length) {
+    L.push('## ' + t('rejected.heading'));
+    L.push('');
+    L.push(
+      result.whitelist.rejectedSample
+        .map(function (r) {
+          return code(r.name);
+        })
+        .join(', ')
+    );
+    L.push('');
+  }
+
+  // --- Appendix: everything that is the same in every report ---------------
+  appendAppendix(L, result, t);
+  appendMethodAndCaveats(L, t);
+  return L.join('\n');
+}
+
+/** The two or three facts that justify the recommendation. */
+function conclusionEvidence(result, t) {
+  const out = [];
+  const bc = (result.candidates || []).find(function (c) {
+    return c.name === result.best.name;
+  });
+  if (!bc) return out;
+  const ver = bc.verified || {};
+  out.push(t(ver.ok && ver.anchored ? 'conclusion.bullet.genuine' : 'conclusion.bullet.forged'));
+  const f = bc.forward || {};
+  if (f.identityMatch === true) out.push(t('conclusion.bullet.identical'));
+  else if (f.attempted) out.push(t('conclusion.bullet.differs'));
+  if (bc.stability) {
+    out.push(
+      t(bc.stability.ok === bc.stability.attempts ? 'conclusion.bullet.stable' : 'conclusion.bullet.unstable', {
+        ok: bc.stability.ok,
+        attempts: bc.stability.attempts
+      })
+    );
+  }
+  if (result.masking) {
+    // Deliberately the short verdict label, not the headline: the headline is printed in
+    // full in the masking section immediately below.
+    out.push(
+      t(result.masking.masking ? 'conclusion.bullet.masking' : 'conclusion.bullet.maskingNone', {
+        verdict: t('verdict.' + result.masking.verdict)
+      })
+    );
+  }
+  return out;
+}
+
+function appendAppendix(L, result, t) {
+  const c = result.controls || {};
+  const wl = result.whitelist || {};
+  L.push('## ' + t('appendix.heading'));
+  L.push('');
+  L.push('### ' + t('identity.heading'));
+  L.push('');
+  L.push('| ' + t('identity.probe') + ' | ' + t('identity.handshake') + ' | ' + t('identity.leafCn') + ' | ' + t('identity.anchored') + ' |');
+  L.push('| --- | --- | --- | --- |');
+  L.push(
+    '| ' + t('identity.noSni') +
+    ' | ' + t(c.noSni && c.noSni.ok ? 'identity.ok' : 'identity.failed') +
+    ' | ' + v(c.noSni && c.noSni.leafCn, '\u2014') +
+    ' | ' + (c.noSni ? t(c.noSni.anchored ? 'misc.yes' : 'misc.no') : '\u2014') + ' |'
+  );
+  L.push(
+    '| ' + code(v(c.strictName && c.strictName.name, 'invalid2.invalid')) +
+    ' | ' + t(c.strictName && c.strictName.ok ? 'identity.accepted' : 'identity.rejected') +
+    ' | ' + v(c.strictName && c.strictName.leafCn, '\u2014') +
+    ' | \u2014 |'
+  );
+  L.push(
+    '| ' + t('identity.randomName') +
+    ' | ' + t(c.randomName && c.randomName.ok ? 'identity.accepted' : 'identity.rejected') +
+    ' | ' + v(c.randomName && c.randomName.leafCn, '\u2014') +
+    ' | \u2014 |'
+  );
+  L.push('');
+  L.push('| ' + t('identity.property') + ' | ' + t('table.value') + ' |');
+  L.push('| --- | --- |');
+  L.push('| ' + t('identity.namesTested') + ' | ' + wl.tested + ' |');
+  L.push('| ' + t('identity.namesAccepted') + ' | ' + wl.accepted + ' |');
+  L.push('| ' + t('identity.distinctCerts') + ' | ' + v(wl.distinctIdentities) + ' |');
+  L.push('| ' + t('identity.generic') + ' | ' + t(wl.genericIdentity ? 'misc.yes' : 'misc.no') + ' |');
+  L.push('| ' + t('identity.arbitrary') + ' | ' + t(wl.randomNameAccepted ? 'misc.yes' : 'misc.no') + ' |');
+  L.push('| ' + t('identity.strictCompatible') + ' | ' + t(wl.realitlscannerCompatible ? 'misc.yes' : 'misc.no') + ' |');
+  L.push('');
+  appendPerNameDetail(L, result, t);
+}
+
+function appendPerNameDetail(L, result, t) {
+  L.push('### ' + t('appendix.detail'));
+  L.push('');
+  const rows = (result.candidates || []).filter(function (x) {
+    return x.stability;
+  });
+  if (!rows.length) {
+    L.push(t('appendix.noDeep', { code: code('--no-deep') }));
+    L.push('');
+    return;
+  }
+  for (let i = 0; i < rows.length; i++) {
+    const x = rows[i];
+    L.push('#### ' + (i + 1) + '. ' + code(x.name) + ' \u2014 ' + x.score + '/100 (' + gradeWord(t, x.grade) + ')');
     L.push('');
     if (x.scoreComponents && x.scoreComponents.length) {
-      L.push('| Score component | Points |');
+      L.push('| ' + t('masking.evidenceDetail') + ' | ' + t('masking.evidenceWeight') + ' |');
       L.push('| --- | --- |');
-      for (const comp of x.scoreComponents) L.push('| ' + comp.reason + ' | ' + (comp.points > 0 ? '+' : '') + comp.points + ' |');
+      for (const comp of x.scoreComponents) {
+        L.push('| ' + renderMsg(t, comp.reason, deps(t)) + ' | ' + (comp.points > 0 ? '+' : '') + comp.points + ' |');
+      }
       L.push('');
     }
     const leaf = x.leaf;
     if (leaf) {
-      L.push('| Certificate | Value |');
+      L.push('| ' + t('table.field') + ' | ' + t('table.value') + ' |');
       L.push('| --- | --- |');
       L.push('| Subject CN | ' + code(v(leaf.cn)) + ' |');
       L.push('| Issuer CN | ' + code(v(leaf.issuerCn)) + ' |');
       L.push('| Valid from | ' + v(leaf.validFrom) + ' |');
       L.push('| Valid to | ' + v(leaf.validTo) + ' |');
-      L.push('| SHA-256 | ' + code(v(shortFp(leaf.fingerprint256)) + '\u2026') + ' |');
+      L.push('| SHA-256 | ' + code(v(shortFp(leaf.fingerprint256), '') + '\u2026') + ' |');
       if (x.reference && x.reference.leafFingerprint256) {
-        L.push('| Matches real site certificate | ' + (leaf.fingerprint256 === x.reference.leafFingerprint256 ? 'yes' : '**no**') + ' |');
+        const same = leaf.fingerprint256 === x.reference.leafFingerprint256;
+        L.push('| ' + t('compare.leaf') + ' | ' + t(same ? 'compare.identical' : 'compare.differ') + ' |');
       }
       L.push('');
     }
-    if (x.forward && x.forward.checks) {
-      L.push('Forward verification against ' + code(v(x.reference && x.reference.address)) + ':');
-      L.push('');
-      L.push('| Check | Result |');
-      L.push('| --- | --- |');
-      for (const k of Object.keys(x.forward.checks)) L.push('| ' + k + ' | ' + x.forward.checks[k] + ' |');
-      if (x.forward.via) L.push('| through node | HTTP ' + x.forward.via.status + ', ' + x.forward.via.bytes + ' bytes, ' + v(x.forward.via.ttfbMs) + ' ms |');
-      if (x.forward.direct) L.push('| direct | HTTP ' + x.forward.direct.status + ', ' + x.forward.direct.bytes + ' bytes, ' + v(x.forward.direct.ttfbMs) + ' ms |');
-      L.push('');
-    }
+    appendComparison(L, x, t);
     if (x.forward && x.forward.assets && x.forward.assets.length) {
-      L.push('| Asset | Through node | Direct | Identical |');
+      L.push('| ' + t('assets.asset') + ' | ' + t('compare.throughNode') + ' | ' + t('compare.realSite') + ' | ' + t('assets.identical') + ' |');
       L.push('| --- | --- | --- | --- |');
       for (const a of x.forward.assets) {
-        L.push('| ' + code(a.path) + ' | ' + (a.via.error ? a.via.error : a.via.bytes + ' B') + ' | ' + (a.direct.error ? a.direct.error : a.direct.bytes + ' B') + ' | ' + (a.identical ? 'yes' : 'no') + ' |');
+        L.push(
+          '| ' + code(a.path) +
+          ' | ' + (a.via.error ? a.via.error : a.via.bytes + ' B') +
+          ' | ' + (a.direct.error ? a.direct.error : a.direct.bytes + ' B') +
+          ' | ' + t(a.identical ? 'misc.yes' : 'misc.no') + ' |'
+        );
       }
       L.push('');
     }
     if (x.stability) {
-      L.push('Stability: ' + x.stability.ok + '/' + x.stability.attempts + ' handshakes, ' + (x.stability.deterministic ? 'identical certificate each time' : 'certificate varied') + ', latency min/median/max ' + v(x.stability.latencyMs.min) + '/' + v(x.stability.latencyMs.median) + '/' + v(x.stability.latencyMs.max) + ' ms.');
+      L.push(
+        t('stability.line', {
+          ok: x.stability.ok,
+          attempts: x.stability.attempts,
+          determinism: t(x.stability.deterministic ? 'stability.deterministic' : 'stability.varied'),
+          min: v(x.stability.latencyMs.min),
+          median: v(x.stability.latencyMs.median),
+          max: v(x.stability.latencyMs.max)
+        })
+      );
       L.push('');
     }
     if (x.forward && x.forward.differences && x.forward.differences.length) {
-      L.push('Differences from the real site:');
+      L.push(t('differences.heading') + ':');
       L.push('');
-      for (const d of x.forward.differences) L.push('- ' + d);
+      for (const d of renderList(t, x.forward.differences, deps(t))) L.push('- ' + d);
       L.push('');
     }
   }
-
-  if (result.summary && result.summary.notes && result.summary.notes.length) {
-    L.push('## Notes');
-    L.push('');
-    for (const note of result.summary.notes) L.push('- ' + note);
-    L.push('');
-  }
-  if (wl.rejectedSample && wl.rejectedSample.length) {
-    L.push('## Names rejected by the node');
-    L.push('');
-    L.push(wl.rejectedSample.map(function (r) { return code(r.name); }).join(', '));
-    L.push('');
-  }
-
-  L.push('## Method');
-  L.push('');
-  L.push('1. **Whitelist mapping** \u2014 raw TLS handshakes with each candidate as SNI, recording only whether the handshake completes.');
-  L.push('2. **Identity check** \u2014 the presented chain is verified **offline** against Node\u2019s bundled trust store: validity windows, signature links, and a trusted anchor.');
-  L.push('3. **Operator identification** \u2014 the node address and the real service address are resolved to an ASN and organisation.');
-  L.push('4. **Forward verification** \u2014 one request goes to the node\u2019s address with the candidate as both SNI and ' + code('Host') + ', and the same request to the real site\u2019s own address; status, length and body SHA-256 are compared.');
-  L.push('');
-  L.push('Control probes (no SNI, ' + code('invalid2.invalid') + ', a random undeclared name) establish what the node does with names it does not own.');
-  L.push('');
-  L.push('## Caveats');
-  L.push('');
-  L.push('- A verified chain proves the node presents the genuine certificate, **not** that it is the genuine operator. A node that transparently forwards to the real site is indistinguishable here from the real site itself \u2014 by design.');
-  L.push('- Sample sizes are small. Scores rank names on one node against each other; they are not absolute safety guarantees.');
-  L.push('- Landing pages are often personalised. Static asset hashes are stronger evidence; add them with ' + code('--assets') + '.');
-  L.push('- Reachability from this vantage point says nothing about blocking from the client\u2019s network.');
-  L.push('');
-  return L.join('\n');
 }
 
-export function renderText(result) {
-  if (result.nodes) return result.nodes.map(renderText).join('\n');
+/**
+ * One table that puts the node and the real site side by side, instead of two paragraphs
+ * the reader has to diff by eye.
+ */
+function appendComparison(L, x, t) {
+  const f = x.forward;
+  if (!f || !f.attempted) return;
+  L.push('**' + t('compare.heading') + '**' + (x.reference && x.reference.address ? ' \u2014 ' + t('compare.referenceAddress') + ': ' + code(x.reference.address) : ''));
+  L.push('');
+  if (f.error) {
+    L.push('- ' + t('forward.failed') + ': ' + f.error);
+    L.push('');
+    return;
+  }
+  const vd = f.verdicts || {};
+  const word = function (k) {
+    return t('compare.' + (k || 'differ'));
+  };
+  L.push('| ' + t('compare.check') + ' | ' + t('compare.throughNode') + ' | ' + t('compare.realSite') + ' | ' + t('compare.result') + ' |');
+  L.push('| --- | --- | --- | --- |');
+  if (f.via && f.direct) {
+    L.push('| ' + t('compare.status') + ' | ' + f.via.status + ' | ' + f.direct.status + ' | ' + word(vd.status) + ' |');
+    L.push('| ' + t('compare.bytes') + ' | ' + f.via.bytes + ' B | ' + f.direct.bytes + ' B | ' + word(vd.bytes) + ' |');
+    L.push('| ' + t('compare.bodyHash') + ' | ' + shortHash(f.via.bodyHash) + ' | ' + shortHash(f.direct.bodyHash) + ' | ' + word(vd.bodyHash) + ' |');
+    L.push('| ' + t('compare.timing') + ' | ' + v(f.via.ttfbMs) + ' ms | ' + v(f.direct.ttfbMs) + ' ms | \u2014 |');
+    L.push('| ' + t('compare.hopCount') + ' | ' + v(f.via.hops, 0) + ' | ' + v(f.direct.hops, 0) + ' | \u2014 |');
+    if (f.leafFingerprint256 || (x.reference && x.reference.leafFingerprint256)) {
+      L.push('| ' + t('compare.leaf') + ' | ' + shortHash(f.leafFingerprint256) + ' | ' + shortHash(x.reference && x.reference.leafFingerprint256) + ' | ' + word(vd.leafFingerprint) + ' |');
+    }
+  }
+  L.push('');
+}
+
+function shortHash(h) {
+  if (!h) return '\u2014';
+  const compact = String(h).replace(/:/g, '');
+  return code(compact.slice(0, 12).toUpperCase() + '\u2026');
+}
+
+function appendMethodAndCaveats(L, t) {
+  L.push('## ' + t('method.heading'));
+  L.push('');
+  L.push('1. ' + t('method.step1'));
+  L.push('2. ' + t('method.step2'));
+  L.push('3. ' + t('method.step3'));
+  L.push('4. ' + t('method.step4', { code: code('Host') }));
+  L.push('');
+  L.push(t('method.controls', { code: code('invalid2.invalid') }));
+  L.push('');
+  L.push('## ' + t('caveats.heading'));
+  L.push('');
+  L.push('- ' + t('caveat.chain'));
+  L.push('- ' + t('caveat.sample'));
+  L.push('- ' + t('caveat.personalised', { code: code('--assets') }));
+  L.push('- ' + t('caveat.vantage'));
+  L.push('');
+}
+
+// ---------------------------------------------------------------------------
+// Plain text
+// ---------------------------------------------------------------------------
+
+export function renderText(result, tIn) {
+  const t = translator(tIn);
+  if (result.nodes) {
+    return result.nodes
+      .map(function (r) {
+        return renderText(r, t);
+      })
+      .join('\n');
+  }
   const out = [];
   const n = result.node;
   out.push('');
   out.push('sni-recon \u2014 ' + n.address + ':' + n.port);
   out.push('='.repeat(64));
   if (!result.reachable) {
-    out.push('UNREACHABLE: ' + (result.summary ? result.summary.message : ''));
+    out.push(t('result.noHandshake') + ' ' + renderMsg(t, result.summary && result.summary.message, deps(t)));
     out.push('');
     return out.join('\n');
   }
   const wl = result.whitelist || {};
   const m = result.masking;
   if (m) {
-    out.push((m.masking ? '[!] MASKING DETECTED' : '[ok] no masking detected') + '  (' + m.method + ', confidence ' + m.confidence + ')');
-    out.push('    ' + m.headline);
+    const tag = m.masking ? '[!] ' + t('masking.detected') : m.verdict === 'genuine-front' ? '[ok] ' + t('masking.notDetected') : '[?] ' + t('masking.inconclusive');
+    out.push(tag + '  (' + t('method.' + m.method) + ', ' + t('confidence.' + m.confidence) + ')');
+    out.push('    ' + renderMsg(t, m.headline, deps(t)));
   }
   if (result.hoster && result.hoster.ok) {
-    out.push('operator: ' + [result.hoster.asn, result.hoster.asName || result.hoster.org].filter(Boolean).join(' ') + (result.hoster.city ? ' \u00b7 ' + result.hoster.city + ', ' + result.hoster.countryCode : '') + (result.hoster.hosting ? '  [datacenter]' : ''));
+    out.push(
+      t('masking.nodeOperator') + ': ' +
+        [result.hoster.asn, result.hoster.asName || result.hoster.org].filter(Boolean).join(' ') +
+        (result.hoster.city ? ' \u00b7 ' + result.hoster.city + ', ' + result.hoster.countryCode : '') +
+        (result.hoster.hosting ? '  [' + t('tui.datacenter') + ']' : '')
+    );
   }
-  out.push('names tested ' + wl.tested + ' \u00b7 accepted ' + wl.accepted + ' \u00b7 distinct certificates ' + v(wl.distinctIdentities));
+  out.push(t('identity.namesTested') + ' ' + wl.tested + ' \u00b7 ' + t('identity.namesAccepted') + ' ' + wl.accepted + ' \u00b7 ' + t('identity.distinctCerts') + ' ' + v(wl.distinctIdentities));
   out.push('');
   if (result.best) {
-    out.push('RECOMMENDED  ' + result.best.name + '   (score ' + result.best.score + '/100, ' + result.best.grade + ')');
+    const weak = result.best.grade === 'poor';
+    out.push(
+      plain(
+        t(weak ? 'conclusion.bestWeak' : 'conclusion.best', {
+          name: result.best.name,
+          score: result.best.score,
+          grade: gradeWord(t, result.best.grade)
+        })
+      )
+    );
     out.push('  serverNames: ' + JSON.stringify(result.best.name));
     out.push('  dest:        ' + result.best.dest);
     out.push('');
+  } else {
+    out.push(t('conclusion.noName'));
+    out.push('');
   }
-  out.push(pad('#', 4) + pad('name', 30) + padL('score', 6) + '  ' + pad('grade', 10) + pad('certificate', 32) + pad('forward', 12) + padL('ms', 7));
-  out.push('-'.repeat(101));
+  const nameWidth = 30;
+  out.push(pad(t('ranking.rank'), 4) + pad(t('ranking.name'), nameWidth) + padL(t('ranking.score'), 6) + '  ' + pad(t('ranking.grade'), 10) + pad(t('ranking.certificate'), 32) + pad(t('ranking.forward'), 12) + padL(t('ranking.medianMs'), 8));
+  out.push('-'.repeat(105));
   const rows = result.candidates || [];
   for (let i = 0; i < rows.length; i++) {
     const x = rows[i];
     const ms = x.stability && x.stability.latencyMs ? x.stability.latencyMs.median : null;
-    out.push(pad(i + 1, 4) + pad(clip(x.name, 29), 30) + padL(v(x.score), 6) + '  ' + pad(v(x.grade), 10) + pad(clip(certVerdict(x), 31), 32) + pad(forwardVerdict(x), 12) + padL(v(ms), 7));
+    out.push(
+      pad(i + 1, 4) +
+        pad(clip(x.name, nameWidth - 1), nameWidth) +
+        padL(v(x.score), 6) + '  ' +
+        pad(clip(gradeWord(t, x.grade), 9), 10) +
+        pad(clip(certVerdict(x, t), 31), 32) +
+        pad(clip(forwardVerdict(x, t), 11), 12) +
+        padL(v(ms), 8)
+    );
   }
   out.push('');
-  if (result.summary && result.summary.notes) {
-    for (const note of result.summary.notes) out.push('note: ' + note);
-  }
+  for (const note of renderList(t, result.summary && result.summary.notes, deps(t))) out.push('note: ' + note);
   out.push('');
   return out.join('\n');
 }
 
-export function render(result, format) {
+export function render(result, format, t) {
   if (format === 'json') return JSON.stringify(result, null, 2);
-  if (format === 'text') return renderText(result);
-  return renderMarkdown(result);
+  if (format === 'text') return renderText(result, t);
+  return renderMarkdown(result, t);
 }
 
-export function defaultOutPath(result, format) {
+export function defaultOutPath(result, format, locale) {
   const host = (result.node ? result.node.address : 'report').replace(/[:]/g, '_');
-  return 'sni-recon-' + host + '.' + (format === 'json' ? 'json' : 'md');
+  const suffix = locale && locale !== DEFAULT_LOCALE ? '.' + locale : '';
+  return 'sni-recon-' + host + suffix + '.' + (format === 'json' ? 'json' : 'md');
 }

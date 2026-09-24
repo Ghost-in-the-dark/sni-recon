@@ -8,4 +8,5 @@ scan*.log
 probe*/
 SNI-REPORT*.md
 .dshwolf/
+.commitmsg
 .DS_Store

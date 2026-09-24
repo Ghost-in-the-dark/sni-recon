@@ -6,6 +6,8 @@
 // line-by-line progress on stderr, and the report still goes to stdout untouched.
 import readline from 'node:readline';
 import { clip, pad, padL, round } from './util.js';
+import { localizer, DEFAULT_LOCALE } from './i18n/index.js';
+import { renderMsg } from './messages.js';
 
 const ESC = String.fromCharCode(27);
 const CSI = ESC + '[';
@@ -74,6 +76,11 @@ function gradeColor(grade) {
   return C.red;
 }
 
+// Verdict ids are machine identifiers; only the label is translated.
+function gradeText(t, grade) {
+  return grade ? t('grade.' + grade) : grade;
+}
+
 function certColor(c) {
   const v = c && c.verified;
   if (!v) return C.gray;
@@ -82,21 +89,21 @@ function certColor(c) {
   return C.yellow;
 }
 
-function certLabel(c) {
+function certLabel(c, t) {
   const v = c && c.verified;
-  if (!v) return 'pending';
-  if (v.ok) return 'genuine';
-  if (!v.anchored) return 'lookalike';
-  return 'invalid';
+  if (!v) return t('tui.pending');
+  if (v.ok) return t('tui.genuine');
+  if (!v.anchored) return t('tui.lookalike');
+  return t('tui.invalid');
 }
 
-function forwardLabel(c) {
+function forwardLabel(c, t) {
   const f = c && c.forward;
   if (!f || !f.attempted) return '\u2014';
-  if (f.error) return 'failed';
-  if (f.identityMatch === true) return 'identical';
-  if (f.comparable) return 'comparable';
-  return 'differs';
+  if (f.error) return t('forward.failed');
+  if (f.identityMatch === true) return t('forward.identical');
+  if (f.comparable) return t('forward.comparable');
+  return t('forward.differs');
 }
 
 function createState(targets) {
@@ -105,7 +112,8 @@ function createState(targets) {
     targetIndex: 0,
     target: targets && targets.length ? targets[0] : null,
     phase: 'init',
-    phaseMessage: 'starting',
+    // Either a plain string or a message value; resolved at draw time.
+    phaseMessage: { key: 'tui.phase.starting' },
     discovery: { done: 0, total: 0, accepted: 0, recent: [] },
     deep: { done: 0, total: 0, current: null, items: [] },
     hoster: null,
@@ -126,6 +134,7 @@ function createState(targets) {
 export function createTui(options) {
   const opts = options || {};
   const colour = opts.color !== false && !process.env.NO_COLOR;
+  const t = typeof opts.t === 'function' ? opts.t : localizer(opts.locale || DEFAULT_LOCALE);
   const tty = opts.tty === undefined ? !!process.stdout.isTTY : !!opts.tty;
   const state = createState(opts.targets);
   let stopped = false;
@@ -155,7 +164,7 @@ export function createTui(options) {
     const s = state;
     const lines = [];
     const t = s.target || {};
-    const title = C.bold + C.cyan + 'sni-recon' + C.reset + C.gray + ' \u00b7 SNI cover analysis' + C.reset;
+    const title = C.bold + C.cyan + 'sni-recon' + C.reset + C.gray + ' \u00b7 ' + t('tui.title') + C.reset;
     const elapsed = C.gray + fmtDuration(Date.now() - s.started) + C.reset;
     const left = title;
     const right = elapsed;
@@ -164,16 +173,18 @@ export function createTui(options) {
     if (s.targets.length > 1) {
       targetLine += C.gray + '  [' + (s.targetIndex + 1) + '/' + s.targets.length + ']' + C.reset;
     }
-    lines.push('target    ' + targetLine);
+    lines.push(C.gray + pad(t('tui.target'), 9) + C.reset + targetLine);
     if (s.hoster && s.hoster.ok) {
       const bits = [s.hoster.asn, s.hoster.asName || s.hoster.org].filter(Boolean).join(' ');
       const place = s.hoster.city ? s.hoster.city + ', ' + (s.hoster.countryCode || '') : s.hoster.country || '';
-      let line = 'operator  ' + C.magenta + clip(bits, 40) + C.reset;
+      let line = C.gray + pad(t('tui.operator'), 9) + C.reset + C.magenta + clip(bits, 40) + C.reset;
       if (place) line += C.gray + ' \u00b7 ' + clip(place, 22) + C.reset;
-      line += s.hoster.hosting ? C.yellow + '  [datacenter]' + C.reset : C.green + '  [not a datacenter]' + C.reset;
+      line += s.hoster.hosting
+        ? C.yellow + '  [' + t('tui.datacenter') + ']' + C.reset
+        : C.green + '  [' + t('tui.notDatacenter') + ']' + C.reset;
       lines.push(line);
     }
-    lines.push('phase     ' + C.bold + s.phaseMessage + C.reset);
+    lines.push(C.gray + pad(t('tui.phase'), 9) + C.reset + C.bold + renderMsg(t, s.phaseMessage) + C.reset);
     return lines;
   }
 
@@ -184,13 +195,18 @@ export function createTui(options) {
     if (s.phase === 'discovery' || s.phase === 'controls' || s.phase === 'init') {
       const d = s.discovery;
       const frac = d.total ? d.done / d.total : 0;
-      const label = 'whitelist   ' + bar(frac, 40) + '  ' + d.done + '/' + d.total + ' probed, ' + C.green + d.accepted + C.reset + ' accepted';
+      const label =
+        C.gray + pad(t('tui.whitelist'), 11) + C.reset + bar(frac, 40) + '  ' +
+        d.done + '/' + d.total + ' ' + t('tui.probed') + ', ' + C.green + d.accepted + C.reset + ' ' + t('tui.accepted');
       out.push(label);
     }
     if (s.phase === 'deep') {
       const d = s.deep;
       const frac = d.total ? d.done / d.total : 0;
-      out.push('deep        ' + bar(frac, 40, C.green) + '  ' + d.done + '/' + d.total + (d.current ? C.gray + '  ' + clip(d.current, 28) + C.reset : ''));
+      out.push(
+        C.gray + pad(t('tui.deep'), 11) + C.reset + bar(frac, 40, C.green) + '  ' + d.done + '/' + d.total +
+          (d.current ? C.gray + '  ' + clip(d.current, 28) + C.reset : '')
+      );
     }
     return out;
   }
@@ -205,12 +221,12 @@ export function createTui(options) {
       out.push(
         C.gray +
           '  ' +
-          padTo('candidate', cols.name) +
-          padTo('presented as', cols.presented) +
-          padTo('certificate', cols.cert) +
-          padTo('forward', cols.fwd) +
-          padToL('score', cols.score) +
-          padToL('ms', cols.ms) +
+          padTo(t('tui.candidate'), cols.name) +
+          padTo(t('tui.presentedAs'), cols.presented) +
+          padTo(t('tui.certificate'), cols.cert) +
+          padTo(t('tui.forward'), cols.fwd) +
+          padToL(t('tui.score'), cols.score) +
+          padToL(t('tui.ms'), cols.ms) +
           C.reset
       );
       const shown = s.deep.items.slice(-12);
@@ -218,9 +234,13 @@ export function createTui(options) {
         const leaf = c.leaf;
         const presented = leaf && leaf.cn ? leaf.cn : '\u2014';
         const same = String(presented).toLowerCase() === String(c.name).toLowerCase();
-        const certTxt = certLabel(c);
-        const fwd = forwardLabel(c);
-        const fwdColour = fwd === 'identical' ? C.green : fwd === 'comparable' ? C.cyan : fwd === 'failed' || fwd === 'differs' ? C.red : C.gray;
+        const certTxt = certLabel(c, t);
+        const fwd = forwardLabel(c, t);
+        const fwdColour =
+          fwd === t('forward.identical') ? C.green
+          : fwd === t('forward.comparable') ? C.cyan
+          : fwd === t('forward.failed') || fwd === t('forward.differs') ? C.red
+          : C.gray;
         out.push(
           '  ' +
             C.bold + padTo(clip(c.name, cols.name - 1), cols.name) + C.reset +
@@ -231,16 +251,21 @@ export function createTui(options) {
             padToL(c.stability && c.stability.latencyMs ? String(round(c.stability.latencyMs.median, 0)) : '', cols.ms)
         );
       }
-      if (s.deep.items.length > shown.length) out.push(C.gray + '  \u2026 ' + (s.deep.items.length - shown.length) + ' earlier candidates' + C.reset);
+      if (s.deep.items.length > shown.length) {
+        out.push(C.gray + '  \u2026 ' + t('tui.earlier', { n: s.deep.items.length - shown.length }) + C.reset);
+      }
     } else if (s.discovery.recent.length) {
-      out.push(C.gray + 'recent probe results' + C.reset);
+      out.push(C.gray + t('tui.recent') + C.reset);
       const shown = s.discovery.recent.slice(-8);
       for (const r of shown) {
         const mark = r.accepted ? C.green + '\u2713' + C.reset : C.gray + '\u00b7' + C.reset;
-        out.push('  ' + mark + ' ' + pad(clip(r.name, 40), 42) + (r.accepted ? C.green + 'accepted' + C.reset : C.gray + 'rejected' + C.reset));
+        out.push(
+          '  ' + mark + ' ' + pad(clip(r.name, 40), 42) +
+            (r.accepted ? C.green + t('identity.accepted') + C.reset : C.gray + t('identity.rejected') + C.reset)
+        );
       }
     } else {
-      out.push(C.gray + 'waiting for the first results\u2026' + C.reset);
+      out.push(C.gray + t('tui.waiting') + C.reset);
     }
     return out;
   }
@@ -251,27 +276,32 @@ export function createTui(options) {
     if (s.finished && s.result) {
       const r = s.result;
       if (r.summary && r.summary.notes) {
-        for (const note of r.summary.notes.slice(0, 2)) out.push(C.gray + 'note  ' + C.reset + clip(note, w - 10));
+        for (const note of r.summary.notes.slice(0, 2)) {
+          out.push(C.gray + pad(t('tui.note'), 6) + C.reset + clip(renderMsg(t, note), w - 10));
+        }
       }
       out.push('');
       if (r.masking) {
         const m = r.masking;
         const tag = m.masking
-          ? C.red + C.bold + '[!] MASKING DETECTED' + C.reset
+          ? C.red + C.bold + '[!] ' + t('masking.detected') + C.reset
           : m.verdict === 'genuine-front'
-          ? C.green + C.bold + '[ok] no masking detected' + C.reset
-          : C.yellow + C.bold + '[?] inconclusive' + C.reset;
-        out.push(tag + C.gray + '  ' + m.method + ' \u00b7 confidence ' + m.confidence + C.reset);
+          ? C.green + C.bold + '[ok] ' + t('masking.notDetected') + C.reset
+          : C.yellow + C.bold + '[?] ' + t('masking.inconclusive') + C.reset;
+        out.push(tag + C.gray + '  ' + t('method.' + m.method) + ' \u00b7 ' + t('masking.confidence') + ' ' + t('confidence.' + m.confidence) + C.reset);
       }
       if (r.best) {
-        out.push(C.bold + 'recommended SNI  ' + C.green + r.best.name + C.reset + C.gray + '   ' + r.best.score + '/100 ' + r.best.grade + C.reset);
+        out.push(
+          C.bold + t('tui.recommended') + '  ' + C.green + r.best.name + C.reset +
+            C.gray + '   ' + r.best.score + '/100 ' + gradeText(t, r.best.grade) + C.reset
+        );
         out.push(C.gray + '  "serverNames": ["' + r.best.name + '"], "dest": "' + r.best.dest + '"' + C.reset);
       } else {
-        out.push(C.yellow + 'no usable cover name found' + C.reset);
+        out.push(C.yellow + t('tui.noName') + C.reset);
       }
     }
     out.push('');
-    out.push(C.gray + (s.finished ? 'report below \u00b7 press q to exit' : 'q detach UI (scan continues) \u00b7 ctrl-c abort') + C.reset);
+    out.push(C.gray + (s.finished ? t('tui.quit') : t('tui.detachHint')) + C.reset);
     return out;
   }
 
@@ -304,13 +334,13 @@ export function createTui(options) {
   }
 
   function plainEvent(evt) {
-    if (evt.type === 'phase') process.stderr.write('[sni-recon] ' + evt.message + '\n');
+    if (evt.type === 'phase') process.stderr.write('[sni-recon] ' + renderMsg(t, evt.message) + '\n');
     else if (evt.type === 'discovery' && (evt.done === evt.total || evt.done % 25 === 0)) {
-      process.stderr.write('[sni-recon] discovery ' + evt.done + '/' + evt.total + '\n');
+      process.stderr.write('[sni-recon] ' + t('progress.discoveryShort', { done: evt.done, total: evt.total }) + '\n');
     } else if (evt.type === 'deep-done') {
-      process.stderr.write('[sni-recon] deep ' + evt.index + '/' + evt.total + ' ' + evt.name + '\n');
+      process.stderr.write('[sni-recon] ' + t('progress.deepShort', { index: evt.index, total: evt.total, name: evt.name }) + '\n');
     } else if (evt.type === 'unreachable') {
-      process.stderr.write('[sni-recon] unreachable: ' + evt.message + '\n');
+      process.stderr.write('[sni-recon] ' + t('progress.unreachableShort', { message: renderMsg(t, evt.message) }) + '\n');
     }
   }
 
@@ -323,7 +353,7 @@ export function createTui(options) {
     switch (evt.type) {
       case 'phase':
         state.phase = evt.phase || state.phase;
-        state.phaseMessage = evt.message || state.phaseMessage;
+        state.phaseMessage = evt.message || state.phaseMessage; // message value, rendered at draw time
         if (evt.total && evt.phase === 'discovery') state.discovery.total = evt.total;
         if (evt.total && evt.phase === 'deep') state.deep.total = evt.total;
         break;
@@ -346,7 +376,7 @@ export function createTui(options) {
         state.deep.current = null;
         break;
       case 'unreachable':
-        state.notes.push('unreachable: ' + evt.message);
+        state.notes.push(evt.message);
         break;
       default:
         break;
@@ -372,7 +402,7 @@ export function createTui(options) {
     state.target = t;
     if (index !== undefined) state.targetIndex = index;
     state.phase = 'init';
-    state.phaseMessage = 'starting';
+    state.phaseMessage = { key: 'tui.phase.starting' };
     state.discovery = { done: 0, total: 0, accepted: 0, recent: [] };
     state.deep = { done: 0, total: 0, current: null, items: [] };
     state.hoster = null;
@@ -386,7 +416,7 @@ export function createTui(options) {
     state.result = result;
     state.finished = true;
     state.phase = 'done';
-    state.phaseMessage = 'complete';
+    state.phaseMessage = { key: 'tui.phase.complete' };
     if (tty) {
       frame();
       // leave the finished frame on screen; the report follows below it
@@ -420,7 +450,7 @@ export function createTui(options) {
 
   function start() {
     if (!tty) {
-      process.stderr.write('[sni-recon] scanning (non-interactive: progress goes to stderr)\n');
+      process.stderr.write('[sni-recon] ' + t('progress.scanning') + '\n');
       return;
     }
     process.stdout.write(HIDE_CURSOR);
@@ -442,7 +472,7 @@ export function createTui(options) {
       if (key.name === 'q' || key.name === 'escape') {
         state.detached = true;
         process.stdout.write(CLEAR_DOWN + SHOW_CURSOR);
-        process.stderr.write('[sni-recon] UI detached; the scan is still running and the report will be written.\n');
+        process.stderr.write('[sni-recon] ' + t('progress.detached') + '\n');
         stop();
       }
     };
@@ -456,6 +486,7 @@ export function createTui(options) {
 
   return {
     tty: tty,
+    t: t,
     start: start,
     stop: stop,
     finish: finish,

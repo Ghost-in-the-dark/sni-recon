@@ -8,6 +8,7 @@
 import https from 'node:https';
 import http from 'node:http';
 import { UA, errText, isIp, log } from './util.js';
+import { REDACTED } from './redact.js';
 
 const CACHE = new Map();
 
@@ -233,10 +234,23 @@ export function clearHosterCache() {
 }
 
 export function describeHoster(h) {
-  if (!h || !h.ok) return 'unknown';
+  if (!h || typeof h !== 'object') return 'unknown';
+  // A fully redacted record would otherwise render as "[redacted] [redacted] · [redacted],
+  // [redacted]" — technically correct and useless to read.
+  if (h.asn === REDACTED || h.org === REDACTED || h.isp === REDACTED) {
+    const present = ['asn', 'asName', 'org', 'isp', 'city', 'countryCode', 'country'].filter(function (k) {
+      return h[k] !== undefined && h[k] !== null;
+    });
+    if (present.length && present.every(function (k) { return h[k] === REDACTED; })) return REDACTED;
+  }
   const bits = [];
   if (h.asn) bits.push(h.asn + (h.asName ? ' ' + h.asName : ''));
   else if (h.org) bits.push(h.org);
+  else if (h.isp) bits.push(h.isp);
   if (h.city || h.countryCode) bits.push([h.city, h.countryCode].filter(Boolean).join(', '));
-  return bits.join(' \u00b7 ');
+  if (bits.length) return bits.join(' \u00b7 ');
+  // A redacted or degraded record still has a label worth showing; only a record with
+  // no identity left at all is reported as unknown.
+  if (h.label) return String(h.label);
+  return 'unknown';
 }

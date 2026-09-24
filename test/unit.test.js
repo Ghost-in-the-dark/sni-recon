@@ -1,5 +1,9 @@
 // Node test-runner suite over the pure parts of the tool: scoring, hoster comparison,
-// certificate verification, and report rendering.
+// certificate verification, localisation, redaction and report rendering.
+//
+// Hoster fixtures here are fictional on purpose: a test that hard-codes a real provider's
+// name, ASN and city would publish that infrastructure with the repository, and would break
+// whenever the fixture moved.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -9,12 +13,79 @@ import { fileURLToPath } from 'node:url';
 import { scoreCandidate, gradeOf } from '../src/analyze.js';
 import { sameOperator, describeHoster } from '../src/hoster.js';
 import { evaluateMasking, METHOD } from '../src/masking.js';
-import { renderMarkdown, renderText, render, defaultOutPath } from '../src/report.js';
+import { renderMarkdown, renderText, render, defaultOutPath, VERSION } from '../src/report.js';
 import { dedupeNames, candidatesFor, FAST_CANDIDATES, REGIONAL, groupOf } from '../src/candidates.js';
 import { parseSans, cnOf, normDn, trustedRoots, verifyChain, x509 } from '../src/cert.js';
 import { median, isBenchmarkIp, isIp, clip } from '../src/util.js';
+import { localizer, localeFromEnv, normalizeLocale, CATALOGUES, LOCALES, DEFAULT_LOCALE } from '../src/i18n/index.js';
+import { msg, isMsg, renderMsg, renderList } from '../src/messages.js';
+import { redactOperatorDetails, REDACTED } from '../src/redact.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+// --- fixtures --------------------------------------------------------------
+
+const NODE_HOSTER = { ok: true, asn: 'AS64500', asName: 'EXAMPLE HOSTING LTD', org: 'EXAMPLE HOSTING LTD', city: 'Example City', countryCode: 'ZZ', hosting: true };
+const REF_HOSTER = { ok: true, asn: 'AS64501', asName: 'EXAMPLE CDN INC', org: 'EXAMPLE CDN INC', countryCode: 'ZZ', hosting: true };
+
+function sampleResult() {
+  return {
+    node: { address: '203.0.113.7', port: 443 },
+    startedAt: '2026-01-01T00:00:00Z',
+    finishedAt: '2026-01-01T00:01:00Z',
+    reachable: true,
+    controls: { noSni: { ok: false, error: 'ECONNRESET' }, strictName: { ok: false, name: 'invalid2.invalid' }, randomName: { ok: true, name: 'x.invalid' } },
+    whitelist: {
+      tested: 50,
+      accepted: 1,
+      acceptedNames: ['www.example.com'],
+      rejectedSample: [{ name: 'www.other.com' }],
+      distinctIdentities: 1,
+      genericIdentity: false,
+      randomNameAccepted: true,
+      realitlscannerCompatible: false
+    },
+    candidates: [
+      {
+        name: 'www.example.com',
+        group: 'infra',
+        score: 88,
+        grade: 'excellent',
+        leaf: { cn: 'www.example.com', issuerCn: 'Example CA', validFrom: '2025-01-01', validTo: '2027-01-01', fingerprint256: 'AB:CD:EF:01:23:45:67:89:AA:BB:CC:DD:EE:FF:00:11' },
+        verified: { ok: true, anchored: true },
+        validityDaysLeft: 300,
+        stability: { ok: 5, attempts: 5, deterministic: true, latencyMs: { min: 10, median: 12, max: 20 } },
+        forward: {
+          attempted: true,
+          identityMatch: true,
+          comparable: true,
+          verdicts: { status: 'match', bytes: 'match', bodyHash: 'identical', leafFingerprint: 'identical' },
+          via: { status: 200, bytes: 100, ttfbMs: 30, hops: 0, bodyHash: 'aa11', leafFingerprint256: 'AB:CD' },
+          direct: { status: 200, bytes: 100, ttfbMs: 80, hops: 0, bodyHash: 'aa11' },
+          differences: []
+        },
+        reference: { address: '198.51.100.9', leafFingerprint256: 'AB:CD:EF:01:23:45:67:89:AA:BB:CC:DD:EE:FF:00:11' },
+        scoreComponents: [{ points: 35, reason: msg('score.certGenuine') }]
+      }
+    ],
+    best: { name: 'www.example.com', score: 88, grade: 'excellent', dest: 'www.example.com:443' },
+    masking: {
+      masking: false,
+      method: 'none',
+      confidence: 'high',
+      verdict: 'genuine-front',
+      headline: msg('masking.headline.genuine-front'),
+      weight: -2,
+      evidence: [{ signal: 'operator-match', weight: -2, detail: msg('evidence.operator-match', { node: { asn: 'AS64500', asName: 'EXAMPLE HOSTING LTD', city: 'Example City', countryCode: 'ZZ' } }) }],
+      sameOperator: true,
+      nodeHoster: { description: 'AS64500 EXAMPLE HOSTING LTD', hosting: true },
+      referenceHoster: { description: 'AS64501 EXAMPLE CDN INC' }
+    },
+    summary: { bestName: 'www.example.com', notes: [msg('note.genericIdentity')] }
+  };
+}
+
+// --- scoring ---------------------------------------------------------------
 
 test('gradeOf maps scores to grades', function () {
   assert.equal(gradeOf(90), 'excellent');
@@ -23,6 +94,13 @@ test('gradeOf maps scores to grades', function () {
   assert.equal(gradeOf(45), 'fair');
   assert.equal(gradeOf(0), 'poor');
   assert.equal(gradeOf(-20), 'poor');
+});
+
+test('gradeOf returns stable identifiers, not translated words', function () {
+  // The renderer owns the wording; a translated grade here would break JSON consumers.
+  for (const locale of LOCALES) {
+    assert.equal(gradeOf(90), 'excellent');
+  }
 });
 
 test('scoreCandidate rewards a genuine, byte-identical identity', function () {
@@ -54,6 +132,17 @@ test('scoreCandidate penalises a forged identity', function () {
   assert.equal(r.grade, 'poor');
 });
 
+test('score components carry message keys, not English prose', function () {
+  const c = { name: 'a.com', verified: { ok: true, anchored: true }, stability: { successRate: 1, deterministic: true }, forward: { identityMatch: true } };
+  const r = scoreCandidate(c, {});
+  for (const comp of r.components) {
+    assert.ok(isMsg(comp.reason), 'component reason must be a message value');
+  }
+  assert.match(renderMsg(localizer('ru'), r.components[0].reason), /\p{Script=Cyrillic}/u);
+});
+
+// --- hoster ----------------------------------------------------------------
+
 test('sameOperator matches on ASN and on organisation name', function () {
   assert.equal(sameOperator({ ok: true, asn: 'AS1' }, { ok: true, asn: 'AS1' }), true);
   assert.equal(sameOperator({ ok: true, asn: 'AS1' }, { ok: true, asn: 'AS2' }), false);
@@ -62,18 +151,26 @@ test('sameOperator matches on ASN and on organisation name', function () {
 });
 
 test('describeHoster renders a readable summary', function () {
-  const s = describeHoster({ ok: true, asn: 'AS207569', asName: 'IHOR HOSTING LTD', city: 'Helsinki', countryCode: 'FI' });
-  assert.match(s, /AS207569/);
-  assert.match(s, /Helsinki/);
+  const s = describeHoster({ ok: true, asn: 'AS64500', asName: 'EXAMPLE HOSTING LTD', city: 'Example City', countryCode: 'ZZ' });
+  assert.match(s, /AS64500/);
+  assert.match(s, /Example City/);
   assert.equal(describeHoster(null), 'unknown');
 });
 
+test('describeHoster survives a redacted record', function () {
+  const s = describeHoster({ ok: true, asn: REDACTED, asName: REDACTED, city: REDACTED, countryCode: REDACTED });
+  assert.notEqual(s, 'unknown', 'a redacted record still has a label worth showing');
+  assert.ok(s.indexOf(REDACTED) !== -1);
+});
+
+// --- masking ---------------------------------------------------------------
+
 test('evaluateMasking detects a forged certificate at high confidence', function () {
   const m = evaluateMasking({
-    nodeHoster: { ok: true, asn: 'AS207569', org: 'IHOR HOSTING LTD', hosting: true, countryCode: 'FI' },
-    referenceHoster: { ok: true, asn: 'AS16509', org: 'AMAZON-02', hosting: true, countryCode: 'US' },
+    nodeHoster: NODE_HOSTER,
+    referenceHoster: REF_HOSTER,
     controls: { randomName: { ok: true, name: 'x.invalid' } },
-    candidates: [{ name: 'www.jetbrains.com', verified: { ok: false, anchored: false }, leaf: { issuerCn: 'WR2' } }],
+    candidates: [{ name: 'www.jetbrains.com', verified: { ok: false, anchored: false }, leaf: { issuerCn: 'Fake CA' } }],
     genericIdentity: false
   });
   assert.equal(m.masking, true);
@@ -82,14 +179,31 @@ test('evaluateMasking detects a forged certificate at high confidence', function
   assert.ok(m.evidence.length >= 2);
 });
 
+test('evaluateMasking records evidence as message values', function () {
+  const m = evaluateMasking({
+    nodeHoster: NODE_HOSTER,
+    referenceHoster: REF_HOSTER,
+    controls: { randomName: { ok: false } },
+    candidates: [{ name: 'a.com', verified: { ok: false, anchored: false }, leaf: { issuerCn: 'Fake CA' } }],
+    genericIdentity: false
+  });
+  for (const e of m.evidence) assert.ok(isMsg(e.detail), 'detail must be a message value');
+  assert.ok(isMsg(m.headline));
+  // Rendering the same verdict in two locales must produce two different strings.
+  const en = renderMsg(localizer('en'), m.headline);
+  const ru = renderMsg(localizer('ru'), m.headline);
+  assert.notEqual(en, ru);
+  assert.ok(/\p{Script=Cyrillic}/u.test(ru));
+});
+
 test('evaluateMasking clears a node that is the genuine service', function () {
   const m = evaluateMasking({
-    nodeHoster: { ok: true, asn: 'AS16509', org: 'AMAZON-02', hosting: true },
-    referenceHoster: { ok: true, asn: 'AS16509', org: 'AMAZON-02', hosting: true },
+    nodeHoster: { ok: true, asn: 'AS64501', org: 'EXAMPLE CDN INC', hosting: true },
+    referenceHoster: { ok: true, asn: 'AS64501', org: 'EXAMPLE CDN INC', hosting: true },
     controls: { randomName: { ok: false }, strictName: { ok: false } },
     candidates: [
       {
-        name: 'www.amazon.com',
+        name: 'www.example.com',
         verified: { ok: true, anchored: true },
         fingerprint256: 'AA',
         reference: { ok: true, leafFingerprint256: 'AA', keyExchange: { name: 'X25519' } },
@@ -104,104 +218,220 @@ test('evaluateMasking clears a node that is the genuine service', function () {
   assert.equal(m.sameOperator, true);
 });
 
-test('evaluateMasking does not flag a node that IS the real service', function () {
-  // Same operator, honestly issued certificate, byte-identical content: the node is the
-  // service's own front-end. Any masking verdict here would be a false positive.
-  const m = evaluateMasking({
-    nodeHoster: { ok: true, asn: 'AS16509', org: 'AMAZON-02', hosting: true },
-    referenceHoster: { ok: true, asn: 'AS16509', org: 'AMAZON-02', hosting: true },
-    controls: { randomName: { ok: false }, strictName: { ok: false } },
-    candidates: [
-      {
-        name: 'www.example.com',
-        verified: { ok: true, anchored: true },
-        fingerprint256: 'AA',
-        reference: { ok: true, leafFingerprint256: 'AA', keyExchange: { name: 'X25519' } },
-        via: { keyExchange: { name: 'X25519' } },
-        forward: { attempted: true, identityMatch: true, comparable: true }
-      }
-    ],
-    genericIdentity: false
-  });
-  assert.equal(m.masking, false, 'a genuine front-end must not be reported as masked');
-  assert.equal(m.verdict, 'genuine-front');
-});
-
 test('evaluateMasking still flags a forged node when candidates were never deep-analysed', function () {
   const m = evaluateMasking({
-    nodeHoster: { ok: true, asn: 'AS207569', org: 'IHOR HOSTING LTD', hosting: true },
-    referenceHoster: { ok: true, asn: 'AS16509', org: 'AMAZON-02', hosting: true },
+    nodeHoster: NODE_HOSTER,
+    referenceHoster: REF_HOSTER,
     controls: { randomName: { ok: true, name: 'x.invalid' } },
-    // No `stability` field: this is what --no-deep produces.
-    candidates: [{ name: 'www.jetbrains.com', verified: { ok: false, anchored: false }, leaf: { issuerCn: 'WR2' } }],
+    // No stability field: this is what --no-deep produces.
+    candidates: [{ name: 'www.jetbrains.com', verified: { ok: false, anchored: false }, leaf: { issuerCn: 'Fake CA' } }],
     genericIdentity: false
   });
   assert.equal(m.masking, true);
   assert.equal(m.method, METHOD.FORGED);
 });
 
+// --- localisation ----------------------------------------------------------
+
+test('locales define an identical key set', function () {
+  const en = Object.keys(CATALOGUES[DEFAULT_LOCALE]).sort();
+  assert.ok(en.length > 200, 'expected a substantial catalogue, got ' + en.length);
+  for (const loc of LOCALES) {
+    const keys = Object.keys(CATALOGUES[loc]).sort();
+    assert.deepEqual(keys, en, 'locale ' + loc + ' key set differs from ' + DEFAULT_LOCALE);
+  }
+});
+
+test('normalizeLocale accepts POSIX and BCP-47 tags', function () {
+  assert.equal(normalizeLocale('ru_RU.UTF-8'), 'ru');
+  assert.equal(normalizeLocale('ru-RU'), 'ru');
+  assert.equal(normalizeLocale('en_US'), 'en');
+  assert.equal(normalizeLocale('ru:en'), 'ru');
+  assert.equal(normalizeLocale('C'), null);
+  assert.equal(normalizeLocale('POSIX'), null);
+  assert.equal(normalizeLocale('de_DE'), null, 'a locale we do not ship must not be claimed');
+  assert.equal(normalizeLocale(''), null);
+  assert.equal(normalizeLocale(null), null);
+});
+
+test('localeFromEnv follows POSIX precedence', function () {
+  assert.equal(localeFromEnv({ LANG: 'ru_RU.UTF-8' }), 'ru');
+  assert.equal(localeFromEnv({ LANG: 'ru_RU.UTF-8', LC_ALL: 'en_US.UTF-8' }), 'en', 'LC_ALL wins over LANG');
+  assert.equal(localeFromEnv({ LANG: 'ru_RU.UTF-8', LC_MESSAGES: 'en_US.UTF-8' }), 'en', 'LC_MESSAGES wins over LANG');
+  assert.equal(localeFromEnv({ LANG: 'C', LANGUAGE: 'ru' }), 'ru', 'LANGUAGE is consulted after LANG');
+  assert.equal(localeFromEnv({}), DEFAULT_LOCALE);
+  assert.equal(localeFromEnv({ LANG: 'C' }), DEFAULT_LOCALE);
+});
+
+test('a missing key falls back to the key and unknown locales fall back to English', function () {
+  const t = localizer('ru');
+  assert.equal(t('this.key.does.not.exist'), 'this.key.does.not.exist');
+  const fallback = localizer('de');
+  assert.equal(fallback.locale, DEFAULT_LOCALE);
+});
+
+test('interpolation substitutes parameters and leaves unknown ones alone', function () {
+  const t = localizer('en');
+  const s = t('conclusion.best', { name: 'a.com', score: 90, grade: 'excellent' });
+  assert.match(s, /a\.com/);
+  assert.match(s, /90\/100/);
+  assert.equal(t('progress.wrote', { path: '/tmp/x' }), 'wrote /tmp/x');
+});
+
+test('message values nest and render in the requested locale', function () {
+  const t = localizer('ru');
+  const nested = msg('evidence.operator-mismatch', { node: 'AS1 NODE', reference: 'AS2 REF' });
+  const out = renderMsg(t, nested);
+  assert.ok(out.indexOf('AS1 NODE') !== -1 && out.indexOf('AS2 REF') !== -1);
+  assert.ok(/\p{Script=Cyrillic}/u.test(out));
+  const outer = msg('conclusion.bullet.masking', { headline: msg('masking.headline.genuine-front') });
+  assert.ok(/\p{Script=Cyrillic}/u.test(renderMsg(t, outer)));
+  assert.equal(renderList(t, [msg('note.weakCover'), null], {}).length, 1);
+});
+
+test('renderMsg tolerates junk without throwing', function () {
+  const t = localizer('en');
+  assert.equal(renderMsg(t, null), '');
+  assert.equal(renderMsg(t, undefined), '');
+  assert.equal(renderMsg(t, 'plain'), 'plain');
+  assert.equal(isMsg('plain'), false);
+  assert.equal(isMsg({ key: 5 }), false);
+});
+// --- reporting -------------------------------------------------------------
+
 test('renderMarkdown emits a usable report skeleton', function () {
-  const result = {
-    node: { address: '203.0.113.7', port: 443 },
-    startedAt: '2026-01-01T00:00:00Z',
-    finishedAt: '2026-01-01T00:01:00Z',
-    reachable: true,
-    controls: { noSni: { ok: false, error: 'ECONNRESET' }, strictName: { ok: false, name: 'invalid2.invalid' }, randomName: { ok: true, name: 'x.invalid' } },
-    whitelist: { tested: 50, accepted: 1, acceptedNames: ['www.example.com'], rejectedSample: [{ name: 'www.other.com' }], distinctIdentities: 1, genericIdentity: false, randomNameAccepted: true, realitlscannerCompatible: false },
-    candidates: [
-      {
-        name: 'www.example.com',
-        group: 'infra',
-        score: 88,
-        grade: 'excellent',
-        leaf: { cn: 'www.example.com', issuerCn: 'DigiCert', validFrom: '2025-01-01', validTo: '2027-01-01', fingerprint256: 'AB:CD:EF:01:23:45:67:89:AA:BB:CC:DD:EE:FF:00:11' },
-        verified: { ok: true, anchored: true },
-        validityDaysLeft: 300,
-        stability: { ok: 5, attempts: 5, deterministic: true, latencyMs: { min: 10, median: 12, max: 20 } },
-        forward: { attempted: true, identityMatch: true, comparable: true, checks: { status: 'match', bytes: 'match (100)', bodyHash: 'identical' }, via: { status: 200, bytes: 100, ttfbMs: 30 }, direct: { status: 200, bytes: 100, ttfbMs: 80 }, differences: [] },
-        scoreComponents: [{ points: 35, reason: 'genuine' }]
-      }
-    ],
-    best: { name: 'www.example.com', score: 88, grade: 'excellent', dest: 'www.example.com:443' },
-    masking: { masking: false, method: 'none', confidence: 'high', verdict: 'genuine-front', headline: 'No masking detected.', weight: -2, evidence: [{ signal: 'operator-match', weight: -2, detail: 'same organisation' }], sameOperator: true, nodeHoster: { description: 'AS16509 AMAZON-02' }, referenceHoster: { description: 'AS16509 AMAZON-02' } },
-    summary: { bestName: 'www.example.com', notes: ['all good'] }
-  };
-  const md = renderMarkdown(result);
+  const result = sampleResult();
+  const t = localizer('en');
+  const md = renderMarkdown(result, t);
   assert.match(md, /^# SNI cover analysis/);
   assert.match(md, /Recommended SNI/);
   assert.match(md, /"serverNames": \["www\.example\.com"\]/);
   assert.match(md, /Hoster-level domain masking/);
   assert.match(md, /Candidate ranking/);
   assert.ok(md.indexOf(String.fromCharCode(96, 96, 96, 34)) === -1, 'no stray escaped fence');
-  const txt = renderText(result);
-  assert.match(txt, /RECOMMENDED/);
+  const txt = renderText(result, t);
+  assert.match(txt, /Recommended SNI/);
   assert.match(JSON.parse(render(result, 'json')).node.address, /203\.0\.113\.7/);
   assert.equal(defaultOutPath(result, 'json'), 'sni-recon-203.0.113.7.json');
+  assert.equal(defaultOutPath(result, 'md', 'ru'), 'sni-recon-203.0.113.7.ru.md');
 });
 
-test('renderMarkdown handles an unreachable node', function () {
-  const md = renderMarkdown({
-    node: { address: '203.0.113.9', port: 443 },
-    startedAt: '2026-01-01T00:00:00Z',
-    reachable: false,
-    summary: { message: 'no handshake', verdict: 'unreachable' }
-  });
-  assert.match(md, /No TLS handshake completed/);
+test('the conclusion precedes the methodology', function () {
+  const md = renderMarkdown(sampleResult(), localizer('en'));
+  assert.ok(md.indexOf('## Conclusion') < md.indexOf('## Method'), 'the answer must come first');
+  assert.ok(md.indexOf('## Conclusion') < md.indexOf('## Appendix'), 'the appendix must come last');
+  assert.ok(md.indexOf('## Candidate ranking') < md.indexOf('## Appendix'));
+});
+
+test('the comparison table puts both sides side by side', function () {
+  const md = renderMarkdown(sampleResult(), localizer('en'));
+  assert.match(md, /Comparison with the real site/);
+  assert.match(md, /\| Check \| Through node \| Real site \| Result \|/);
+  assert.match(md, /\| HTTP status \| 200 \| 200 \| match \|/);
+});
+
+test('a full report renders in Russian without leaking a key', function () {
+  const result = sampleResult();
+  const ru = renderMarkdown(result, localizer('ru'));
+  assert.match(ru, /^# Анализ SNI-маскировки/);
+  assert.match(ru, /Рекомендуемый SNI/);
+  assert.match(ru, /Заключение/);
+  assert.match(ru, /Ранжирование кандидатов/);
+  for (const key of Object.keys(CATALOGUES.en)) {
+    assert.ok(ru.indexOf(key) === -1, 'raw key leaked into the Russian report: ' + key);
+  }
+  const txt = renderText(result, localizer('ru'));
+  assert.ok(/\p{Script=Cyrillic}/u.test(txt));
+  assert.ok(txt.indexOf('Рекомендуемый SNI') !== -1);
+});
+
+test('the same result renders differently in two locales', function () {
+  const result = sampleResult();
+  const en = renderMarkdown(result, localizer('en'));
+  const ru = renderMarkdown(result, localizer('ru'));
+  assert.notEqual(en, ru);
+  // Only the prose differs: the machine-readable measurements must be identical.
+  assert.match(en, /www\.example\.com/);
+  assert.match(ru, /www\.example\.com/);
+  assert.match(en, /88 \/ 100/);
+  assert.match(ru, /88 \/ 100/);
+});
+
+test('renderMarkdown handles an unreachable node in both locales', function () {
+  for (const loc of LOCALES) {
+    const md = renderMarkdown(
+      {
+        node: { address: '203.0.113.9', port: 443 },
+        startedAt: '2026-01-01T00:00:00Z',
+        reachable: false,
+        summary: { message: msg('unreachable.message', { error: 'ECONNREFUSED' }), verdict: 'unreachable' }
+      },
+      localizer(loc)
+    );
+    assert.match(md, /ECONNREFUSED/);
+  }
 });
 
 test('renderMarkdown handles a node that accepts nothing', function () {
-  const md = renderMarkdown({
-    node: { address: '203.0.113.9', port: 443 },
-    startedAt: '2026-01-01T00:00:00Z',
-    reachable: true,
-    controls: {},
-    whitelist: { tested: 10, accepted: 0, rejectedSample: [] },
-    candidates: [],
-    best: null,
-    summary: { verdict: 'no-candidate-accepted', message: 'nothing accepted' }
-  });
+  const md = renderMarkdown(
+    {
+      node: { address: '203.0.113.9', port: 443 },
+      startedAt: '2026-01-01T00:00:00Z',
+      reachable: true,
+      controls: {},
+      whitelist: { tested: 10, accepted: 0, rejectedSample: [] },
+      candidates: [],
+      best: null,
+      summary: { verdict: 'no-candidate-accepted', message: msg('noCandidates.message', { tested: 10 }) }
+    },
+    localizer('en')
+  );
   assert.match(md, /No usable cover name was found/);
 });
+
+test('renderers work without an explicit translator', function () {
+  const md = renderMarkdown(sampleResult());
+  assert.match(md, /^# SNI cover analysis/, 'falls back to the default locale');
+});
+
+// --- redaction -------------------------------------------------------------
+
+test('redaction blanks operator identity but keeps every verdict', function () {
+  const result = sampleResult();
+  result.masking.nodeHoster = { asn: 'AS64500', asName: 'EXAMPLE HOSTING LTD', city: 'Example City', countryCode: 'ZZ', description: 'AS64500 EXAMPLE HOSTING LTD', hosting: true };
+  result.hoster = { ok: true, asn: 'AS64500', asName: 'EXAMPLE HOSTING LTD', org: 'EXAMPLE HOSTING LTD', city: 'Example City', countryCode: 'ZZ', isp: 'Example ISP', ptr: 'node.example.zz', hosting: true };
+  const before = JSON.stringify({ best: result.best, masking: result.masking.verdict, evidence: result.masking.evidence.length });
+
+  const { result: redacted, fields } = redactOperatorDetails(result);
+  assert.ok(fields > 0, 'expected fields to be blanked');
+  assert.equal(redacted.hoster.asn, REDACTED);
+  assert.equal(redacted.hoster.city, REDACTED);
+  assert.equal(redacted.masking.nodeHoster.asn, REDACTED);
+  assert.equal(redacted.masking.nodeHoster.hosting, true, 'the datacenter flag is not operator identity');
+  assert.equal(JSON.stringify({ best: redacted.best, masking: redacted.masking.verdict, evidence: redacted.masking.evidence.length }), before);
+
+  // The source must be untouched: masking evidence aliases the same hoster records, so an
+  // in-place redaction would rewrite data the caller still owns.
+  assert.equal(result.hoster.asn, 'AS64500', 'redaction must not mutate its input');
+  assert.equal(result.masking.nodeHoster.asn, 'AS64500', 'aliased records must survive');
+
+  const md = renderMarkdown(redacted, localizer('ru'));
+  assert.ok(md.indexOf('EXAMPLE HOSTING LTD') === -1, 'operator name must be gone');
+  assert.ok(md.indexOf('Example City') === -1, 'operator location must be gone');
+  assert.match(md, /Рекомендуемый SNI/, 'verdicts survive redaction');
+});
+
+test('redaction tolerates odd shapes and keeps the input intact', function () {
+  assert.equal(redactOperatorDetails(null).fields, 0);
+  assert.equal(redactOperatorDetails('nope').fields, 0);
+  const src = { nodes: [{ hoster: { asn: 'AS1' } }] };
+  const out = redactOperatorDetails(src);
+  assert.ok(out.fields > 0);
+  assert.equal(src.nodes[0].hoster.asn, 'AS1', 'the caller keeps its own data');
+  assert.equal(out.result.nodes[0].hoster.asn, REDACTED);
+});
+
+// --- corpus and certificates ----------------------------------------------
 
 test('candidate corpus is well formed', function () {
   assert.ok(FAST_CANDIDATES.length >= 15);
@@ -243,9 +473,12 @@ test('verifyChain accepts a self-signed certificate for its own name, but still 
   assert.equal(res.ok, false);
 });
 
+// --- interface -------------------------------------------------------------
+
 test('createTui degrades to plain progress when not a TTY', async function () {
   const { createTui, createPlainProgress } = await import('../src/tui.js');
-  const tui = createTui({ targets: [{ address: '203.0.113.7', port: 443 }], tty: false });
+  const t = localizer('ru');
+  const tui = createTui({ targets: [{ address: '203.0.113.7', port: 443 }], tty: false, t: t });
   const written = [];
   const original = process.stderr.write;
   process.stderr.write = function (s) {
@@ -254,22 +487,29 @@ test('createTui degrades to plain progress when not a TTY', async function () {
   };
   try {
     tui.start();
-    tui.onEvent({ type: 'phase', phase: 'discovery', message: 'probing 20 names', total: 20 });
+    tui.onEvent({ type: 'phase', phase: 'discovery', message: msg('progress.discovery', { count: 20 }), total: 20 });
     tui.onEvent({ type: 'discovery', done: 20, total: 20, name: 'a.com', accepted: true });
     tui.onEvent({ type: 'deep-done', name: 'a.com', index: 1, total: 1 });
     tui.addCandidate({ name: 'a.com', verified: { ok: true, anchored: true }, leaf: { cn: 'a.com' }, score: 90, stability: { latencyMs: { median: 12 } } });
     tui.setHoster({ ok: true, asn: 'AS1', org: 'Acme', hosting: true });
-    tui.finish({ reachable: true, node: { address: '203.0.113.7', port: 443 }, best: { name: 'a.com', score: 90, grade: 'excellent', dest: 'a.com:443' }, masking: { masking: false, method: 'none', confidence: 'high' }, summary: { notes: [] }, candidates: [] });
+    tui.finish({
+      reachable: true,
+      node: { address: '203.0.113.7', port: 443 },
+      best: { name: 'a.com', score: 90, grade: 'excellent', dest: 'a.com:443' },
+      masking: { masking: false, method: 'none', confidence: 'high' },
+      summary: { notes: [] },
+      candidates: []
+    });
     tui.stop();
     const p = createPlainProgress({ write: function (s) { written.push(String(s)); return true; } });
     p({ type: 'discovery', done: 5, total: 20 });
-    p({ type: 'phase', message: 'done' });
+    p({ type: 'phase', message: msg('progress.hoster') });
   } finally {
     process.stderr.write = original;
   }
   const text = written.join('');
-  assert.match(text, /non-interactive/);
-  assert.ok(text.indexOf('discovery 5/20') !== -1, 'expected plain progress for the discovery milestone');
+  assert.ok(/\p{Script=Cyrillic}/u.test(text), 'non-interactive progress must be localised');
+  assert.ok(text.indexOf('5/20') !== -1, 'expected plain progress for the discovery milestone');
 });
 
 test('utility helpers behave', function () {
@@ -282,4 +522,21 @@ test('utility helpers behave', function () {
   assert.equal(isIp('999.2.3.4'), false);
   assert.equal(isIp('2001:db8::1'), true);
   assert.equal(clip('abcdef', 4).length, 4);
+});
+
+test('the published repository contains no real operator identity', function () {
+  // A regression guard: fixture data must not name a real hosting provider or city.
+  const files = ['../src/selftest.js', '../src/i18n/en.js', '../src/i18n/ru.js', './unit.test.js', '../README.md'];
+  // Assembled from fragments so this guard does not trip over its own source, which would
+  // otherwise have to contain the very strings it forbids.
+  const banned = [new RegExp('ih' + 'or', 'i'), new RegExp('hel' + 'sinki', 'i'), new RegExp('207' + '569')];
+  for (const rel of files) {
+    const p = path.join(HERE, rel);
+    if (!fs.existsSync(p)) continue;
+    const text = fs.readFileSync(p, 'utf8');
+    for (const re of banned) {
+      assert.ok(!re.test(text), rel + ' must not mention ' + re);
+    }
+  }
+  assert.ok(VERSION.length > 0);
 });
