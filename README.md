@@ -28,6 +28,8 @@ That verdict is wrong. The node may be forwarding traffic for a domain that *is*
 
 Requires Node.js 18 or newer. No dependencies.
 
+The console report is laid out in **terminal cells**, not in character counts, so columns stay aligned in Cyrillic, under colour escapes, and in any East Asian locale.
+
 ```bash
 git clone https://github.com/Ghost-in-the-dark/sni-recon.git
 cd sni-recon
@@ -56,10 +58,17 @@ sni-recon selftest    # end-to-end checks against local fake nodes
 sni-recon <address[:port]> [more addresses...] [options]
 ```
 
-A full run, interactive UI and Markdown report:
+A full run — asks for the language once, draws the live frame, prints the report:
 
 ```bash
 sni-recon 203.0.113.7
+```
+
+Markdown and JSON are one flag away:
+
+```bash
+sni-recon 203.0.113.7 --format md --out report.md
+sni-recon 203.0.113.7 --json
 ```
 
 ### The interactive frame
@@ -67,36 +76,70 @@ sni-recon 203.0.113.7
 The interface draws a live frame: the operator, progress through the whitelist, and each candidate as its certificate and forwarding are resolved.
 
 ```
-┌ sni-recon · SNI cover analysis ────────────────────────────────────────────────┐
-│ target    203.0.113.7:443                                                   12s │
+┌ sni-recon · SNI cover analysis ─────────────────────────────────────────────────┐
+│ target    185.112.83.164:443                                               1:12 │
 │ operator  AS64500 EXAMPLE HOSTING LTD · Example City, ZZ  [datacenter]          │
 │ phase     verifying 3 accepted names                                            │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
- whitelist  ██████████████████████░░░░░░░░░░░░░░░░░░░░░░  41/120 probed, 3 accepted
+ whitelist  ██████████████████████░░░░░░░░░░░░░░░░░░░░░░  102/102 probed, 3 accepted
 
-   candidate               presented as            certificate forward      score  ms
-   www.example.com         www.example.com         genuine     identical       90  12
-   other.example           www.example.com         lookalike   failed         -40
-   api.example             api.example             genuine     comparable      30   5
+   candidate                     presented as                certificate  forward       score  ms
+ ▸  1 www.samsung.com             www.samsung.com             genuine      differs          62 132
+    2 openai.com                  www.samsung.com             lookalike    failed          -38 124
+    3 github.com                  www.samsung.com             invalid      failed          -42 127
+  9 above · 0 below
+
+ recommended SNI  www.samsung.com   62/100 · good
+                  "serverNames": ["www.samsung.com"], "dest": "www.samsung.com:443"
 
  q detach UI (scan continues) · ctrl-c abort
 ```
 
-Press `q` to detach — the scan keeps running and the report is still written. Below about 78 columns the table drops to names and verdicts rather than wrapping; in a short terminal the *newest* candidates are the ones kept, and the header, footer and recommendation always stay on screen. When stdout is not a terminal (a pipe, a redirect, CI) the frame degrades to line-by-line progress on stderr and the report still goes to stdout untouched.
+Keys: **↑ ↓** move between names, **PgUp/PgDn** page, **Home/End** jump, **c** print the configuration again, **?** help, **q** detach (the scan keeps running), **ctrl-c** abort.
+
+While a scan is running the table **follows the newest results**. Pressing an arrow key stops the follow and pins the selection; moving back to the last row resumes it. The row under the cursor is marked with `▸`, and how many rows are out of view is stated rather than left to be inferred from a silently truncated list.
+
+Below 78 columns the four right-hand columns cannot share a line with a readable name, so the table drops the group column and then folds the two verdict columns into one cell — rather than dropping one of them, because "genuine but not forwarding" and "lookalike but forwarding" are different answers. When stdout is not a terminal (a pipe, a redirect, CI) the frame degrades to line-by-line progress on stderr and the report still goes to stdout untouched.
 
 ### Language
 
-The locale comes from the flag first, then the environment, then English:
+On a terminal, the first run **asks** — and remembers the answer in `./.env`, so it is a one-time question rather than a per-run tax:
+
+```
+┌ sni-recon · SNI cover analysis ─────────────────────────────────────────────────┐
+│  Choose interface language                                                      │
+│                                                                                 │
+│  ▸ 1  English          (default)                                                │
+│    2  Русский                                                                   │
+│                                                                                 │
+│  The choice is saved to .env and used by every later run. Pass --lang to        │
+│  override it once.                                                              │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Press `1`/`2`, or `e`/`r` (Cyrillic `у`/`р` work too), or Enter for the default. The prompt appears **only** on a real terminal with no answer already available; a pipe or a CI job is never blocked on a keystroke.
+
+The resolution order is:
+
+1. `--lang` / `-L` on the command line — never prompts
+2. `SNI_RECON_LANG` in the environment
+3. `SNI_RECON_LANG` in `./.env`, written by a previous interactive run
+4. the prompt, whose answer is saved back to `./.env`
 
 ```bash
-sni-recon 203.0.113.7 --lang ru      # or -L ru
+sni-recon 203.0.113.7                 # asks once, then remembers
+sni-recon 203.0.113.7 --lang ru       # this run only, in Russian
 LANG=ru_RU.UTF-8 sni-recon 203.0.113.7
+SNI_RECON_LANG=ru sni-recon 203.0.113.7
 ```
 
 `LC_ALL` and `LC_MESSAGES` take precedence over `LANG`, as POSIX specifies. An unshipped locale such as `de_DE` falls back to English rather than guessing.
 
+Writing the setting preserves whatever else your `.env` holds — an existing assignment is replaced in place, comments and unrelated keys are left alone. If the file cannot be written the run continues and says so; an unwritable directory must not abort a scan.
+
 The report carries the language it was rendered in by design: the engine stores findings as *structured values*, not as finished sentences, so a JSON consumer never has to parse prose to act on a signal.
+
 
 ### More examples
 
@@ -155,9 +198,10 @@ sni-recon 203.0.113.7 --server-names www.example.com --repeat 10
 | `--no-hoster` | Skip operator lookup and the masking verdict |
 | `--no-follow` | Do not follow redirects |
 | `--no-operator-details` | Blank the operator name, ASN and location in the report |
-| `-L, --lang code` | Report and interface language (`en`, `ru`) |
+| `-L, --lang code` | Report and interface language (`en`, `ru`); skips the prompt |
 | `--tui` / `--no-tui` | Force the interactive UI on or off |
-| `--format md\|json\|text` | Output format (default md) |
+| `--width n` | Wrap the report to this many columns (default: terminal width) |
+| `--format text\|md\|json` | Output format (default text) |
 | `--out file\|-` | Write the report to a file |
 | `--list-candidates` | Print the built-in corpus |
 
@@ -177,13 +221,49 @@ Redaction is applied **after** the analysis and **before** rendering, so it can 
 
 ## How the report is laid out
 
+The console report is the primary reading surface: framed boxes, aligned fields and real
+tables, wrapped to the terminal width.
+
+```
+┌ Summary ────────────────────────────────────────────────────────────────────────┐
+│ Recommended SNI    www.samsung.com                                              │
+│ Score              62 / 100   good                                              │
+│ Certificate        genuine (chain verified)                                     │
+│ Forwarding         differs                                                      │
+│ Median handshake latency132.7 ms                                                │
+│                                                                                 │
+│ Configuration: "serverNames": ["www.samsung.com"], "dest": "www.samsung.com:443"│
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌ Hoster-level domain masking ────────────────────────────────────────────────────┐
+│ Inconclusive — Possible domain masking: the node relays for another domain, but   │
+│ the operator could not be identified.                                            │
+│                                                                                  │
+│ Method         Transparent forward                                               │
+│ Confidence     medium                                                            │
+│ Signal weight  4                                                                 │
+│                                                                                  │
+│ 0    the node serves one certificate for every name, but so does the real         │
+│      service — this is CDN edge behaviour, not masking                           │
+│ +4   the node runs on AS64500 EXAMPLE HOSTING LTD, while the real service runs    │
+│      on AS64501 — different operators                                            │
+└──────────────────────────────────────────────────────────────────────────────────┘
+
+▸ CANDIDATE RANKING ───────────────────────────────────────────────────────────────
+  #  Name             Group  Score  Grade   Certificate  Forward     Median ms
+  ────────────────────────────────────────────────────────────────────────────────
+  1  www.samsung.com  infra     62  good    genuine      differs         132.7
+  2  openai.com       ai       -38  poor    lookalike    failed            130
+```
+
 The reader is told the **answer first**:
 
-1. **Conclusion** — the recommended SNI, a ready-to-paste configuration, the two or three facts that justify it, and the masking verdict with its evidence table.
-2. **Candidate ranking** — every name, scored.
-3. **Notes and rejected names.**
-4. **Appendix** — node identity, per-name detail, and a side-by-side comparison with the real site.
-5. **Method and caveats** — identical in every report, so it sits at the end.
+1. **Summary** — the recommended SNI, a ready-to-paste configuration and the verdicts that justify it.
+2. **Masking** — the verdict, its evidence and each signal's weight.
+3. **Candidate ranking** — every name, scored.
+4. **Notes and rejected names.**
+5. **Appendix** — node identity, per-name detail, and a side-by-side comparison with the real site.
+6. **Method and caveats** — identical in every report, so it sits at the end.
 
 The comparison is a three-column table rather than two paragraphs the reader has to diff by eye:
 
@@ -194,6 +274,12 @@ The comparison is a three-column table rather than two paragraphs the reader has
 | Body SHA-256 | `3F2A9C10E4B7…` | `3F2A9C10E4B7…` | identical |
 | Time to first byte | 191.5 ms | 142.5 ms | — |
 | Leaf certificate | `A1B2C3D4E5F6…` | `A1B2C3D4E5F6…` | identical |
+
+### Why widths are measured in cells
+
+`String#length` is not a display width. A colour escape occupies indices but no columns; a full-width glyph occupies one code point but two columns. Layout code that mixes the two puts the last column of a table one cell further right than the frame, and the row wraps — which is worse than a cosmetic flaw, because every following line then lands one row lower than the cursor arithmetic assumes and the whole frame shears. Every width in the renderer and the TUI goes through `cellWidth()` / `clipCell()` / `padCell()` in `src/util.js`, and the test suite asserts that no line of a report exceeds the width it was laid out to, in both locales, at two widths.
+
+Markdown (`--format md`) and JSON (`--format json`) remain available; text is the default because it is the one meant to be read in a terminal.
 
 ---
 

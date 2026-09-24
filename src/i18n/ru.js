@@ -47,6 +47,14 @@ export default {
   'cert.lookalike': 'подделка (нет публичного доверия)',
   'cert.invalid': 'цепочка недействительна',
 
+  'cert.short.genuine': 'настоящий',
+  'cert.short.lookalike': 'подделка',
+  'cert.short.invalid': 'цепочка бита',
+  'cert.short.none': 'не проверен',
+  'forward.short.identical': 'идентично',
+  'forward.short.comparable': 'сопоставимо',
+  'forward.short.differs': 'отличается',
+  'forward.short.failed': 'сбой',
   // --- вердикты по форварду ------------------------------------------------
   'forward.identical': 'совпадает',
   'forward.comparable': 'сопоставим',
@@ -308,7 +316,8 @@ export default {
   'help.optNoOperatorDetails': 'Скрыть в отчёте имя оператора, ASN и локацию, сохранив все вердикты.',
   'help.optTui': 'Принудительно включить или выключить интерактивный интерфейс.',
   'help.optLang': 'Язык отчёта и интерфейса. Доступны: {list}',
-  'help.optFormat': 'Формат вывода (по умолчанию md).',
+  'help.optFormat': 'Формат вывода (по умолчанию text).',
+  'help.optWidth': 'Переносить отчёт по этой ширине (по умолчанию — ширина терминала).',
   'help.optJson': 'Сокращение для --format json.',
   'help.optOut': 'Записать отчёт в файл («-» для stdout).',
   'help.optListCandidates': 'Показать встроенный набор имён и выйти.',
@@ -393,11 +402,37 @@ export default {
   'selftest.detail.fieldsBlanked': 'полей скрыто',
   'selftest.detail.verdictsIntact': 'вердикт и оценка совпадают до и после редактирования',
   'selftest.detail.operatorGone': 'имя и локация оператора отсутствуют в готовом отчёте',
+  'selftest.textFramed': 'текстовый отчёт нарисован рамкой',
+  'selftest.textFitsWidth': 'ни одна строка текстового отчёта не выходит за заданную ширину',
+  'selftest.textNarrow': 'узкий русский отчёт укладывается в свою ширину',
+  'selftest.envLangRoundTrip': 'запомненный язык сохраняется и читается через .env',
+  'selftest.envLangPreserves': 'запись языка не трогает остальные строки .env',
+  'selftest.envMissingIsEmpty': 'отсутствующий .env — это пусто, а не ошибка',
+  'selftest.detail.unrelatedIntact': 'комментарии и посторонние присваивания уцелели',
+
 
   'selftest.redactionNonDestructive': 'редактирование не изменяет результат анализа',
   'selftest.detail.sourceIntact': 'записи об операторе у вызывающего кода не тронуты',
   'selftest.mdNoConfigForWeak': 'отчёт Markdown не предлагает конфигурацию для слабого имени',
   'selftest.detail.noConfigForWeak': 'низкая оценка не должна подаваться как рекомендация',
+// --- текстовый отчёт -----------------------------------------------------
+  'text.summary': 'Итог',
+  'text.recommend': 'Рекомендуемый SNI',
+  'text.score': 'Оценка',
+  'text.certificate': 'Сертификат',
+  'text.forward': 'Форвард',
+
+  // --- выбор языка и его сохранение ----------------------------------------
+  'lang.prompt': 'Выберите язык интерфейса',
+  'lang.default': 'по умолчанию',
+  'lang.remember': 'Выбор сохраняется в .env и используется во всех следующих запусках. Разово переопределить можно флагом --lang.',
+  'lang.saved': 'язык интерфейса сохранён в {path}',
+
+  'tui.more': 'выше {above} · ниже {below}',
+  'tui.help.title': 'Клавиши',
+  'tui.help.body': '↑ ↓ переход по именам · PgUp PgDn постранично · Home End в начало и конец · c показать конфигурацию ещё раз · ? эта справка · q отцепить интерфейс (скан продолжится) · ctrl-c прервать',
+  'tui.help.close': '? или q закрывает справку',
+
   // --- прочее --------------------------------------------------------------
   'misc.na': 'н/д',
   'misc.yes': 'да',

@@ -48,6 +48,14 @@ export default {
   'cert.lookalike': 'lookalike (not publicly trusted)',
   'cert.invalid': 'chain invalid',
 
+  'cert.short.genuine': 'genuine',
+  'cert.short.lookalike': 'lookalike',
+  'cert.short.invalid': 'invalid chain',
+  'cert.short.none': 'not checked',
+  'forward.short.identical': 'identical',
+  'forward.short.comparable': 'comparable',
+  'forward.short.differs': 'differs',
+  'forward.short.failed': 'failed',
   // --- forward verdicts ----------------------------------------------------
   'forward.identical': 'identical',
   'forward.comparable': 'comparable',
@@ -308,7 +316,8 @@ export default {
   'help.optNoOperatorDetails': 'Blank the operator name, ASN and location in the report, keeping every verdict.',
   'help.optTui': 'Force the interactive UI on or off.',
   'help.optLang': 'Report and interface language. Available: {list}',
-  'help.optFormat': 'Output format (default md).',
+  'help.optFormat': 'Output format (default text).',
+  'help.optWidth': 'Wrap the report to this many columns (default: terminal width).',
   'help.optJson': 'Shorthand for --format json.',
   'help.optOut': "Write the report to a file ('-' for stdout).",
   'help.optListCandidates': 'Print the built-in corpus and exit.',
@@ -393,11 +402,37 @@ export default {
   'selftest.detail.fieldsBlanked': 'fields blanked',
   'selftest.detail.verdictsIntact': 'same verdict and score before and after redaction',
   'selftest.detail.operatorGone': 'operator name and location absent from the rendered report',
+  'selftest.textFramed': 'the text report is drawn as a frame',
+  'selftest.textFitsWidth': 'no line of the text report exceeds the requested width',
+  'selftest.textNarrow': 'a narrow Russian report still fits its width',
+  'selftest.envLangRoundTrip': 'the remembered language round-trips through .env',
+  'selftest.envLangPreserves': 'writing the language leaves unrelated .env lines intact',
+  'selftest.envMissingIsEmpty': 'a missing .env is empty, not an error',
+  'selftest.detail.unrelatedIntact': 'commented and unrelated assignments survive',
+
 
   'selftest.redactionNonDestructive': 'redaction does not modify the analysis result',
   'selftest.detail.sourceIntact': 'the caller’s hoster records were left untouched',
   'selftest.mdNoConfigForWeak': 'markdown report withholds a configuration for a weak name',
   'selftest.detail.noConfigForWeak': 'a poor score must not be presented as a recommendation',
+// --- plain-text report -----------------------------------------------
+  'text.summary': 'Summary',
+  'text.recommend': 'Recommended SNI',
+  'text.score': 'Score',
+  'text.certificate': 'Certificate',
+  'text.forward': 'Forwarding',
+
+  // --- language prompt / persistence ---------------------------------------
+  'lang.prompt': 'Choose interface language',
+  'lang.default': 'default',
+  'lang.remember': 'The choice is saved to .env and used by every later run. Pass --lang to override it once.',
+  'lang.saved': 'interface language saved to {path}',
+
+  'tui.more': '{above} above · {below} below',
+  'tui.help.title': 'Keys',
+  'tui.help.body': '↑ ↓ move between names · PgUp PgDn page · Home End jump · c print the configuration again · ? this help · q detach (the scan keeps running) · ctrl-c abort',
+  'tui.help.close': '? or q closes this help',
+
   // --- misc ----------------------------------------------------------------
   'misc.na': 'n/a',
   'misc.yes': 'yes',

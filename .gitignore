@@ -8,5 +8,7 @@ scan*.log
 probe*/
 SNI-REPORT*.md
 .dshwolf/
+.env
+.env.local
 .commitmsg
 .DS_Store

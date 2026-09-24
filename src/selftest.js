@@ -22,6 +22,7 @@ import { evaluateMasking } from './masking.js';
 import { trustedRoots, x509 } from './cert.js';
 import { localizer, DEFAULT_LOCALE, CATALOGUES } from './i18n/index.js';
 import { redactOperatorDetails, REDACTED } from './redact.js';
+import { cellWidth, readEnvFile, writeEnvSetting } from './util.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, '..', 'test', 'fixtures');
@@ -182,6 +183,24 @@ export async function runSelftest(opts, tIn) {
     check(results, 'selftest.mdConfig', goodMd.indexOf('"serverNames"') !== -1, '');
     check(results, 'selftest.mdConclusionFirst', md.indexOf(t('conclusion.heading')) < md.indexOf(t('method.heading')), t('selftest.detail.answerFirst'));
     check(results, 'selftest.txtRenders', renderText(forgedResult, t).indexOf('sni-recon') !== -1, '');
+    // The text report is the default reading surface, so it gets its own shape checks:
+    // it must be framed, and no line may exceed the width it was laid out to. A line
+    // wider than the frame shears the box drawing, which unit tests alone did not catch.
+    const txt100 = renderText(forgedResult, t, { width: 100 });
+    check(results, 'selftest.textFramed', txt100.indexOf('\u250c') !== -1 && txt100.indexOf('\u2518') !== -1, 'box drawing present');
+    check(
+      results,
+      'selftest.textFitsWidth',
+      txt100.split('\n').every(function (l) { return cellWidth(l) <= 100; }),
+      'widest line: ' + txt100.split('\n').reduce(function (m, l) { return Math.max(m, cellWidth(l)); }, 0)
+    );
+    const ruWide = renderText(forgedResult, localizer('ru'), { width: 72 });
+    check(
+      results,
+      'selftest.textNarrow',
+      ruWide.split('\n').every(function (l) { return cellWidth(l) <= 72; }),
+      'widest line: ' + ruWide.split('\n').reduce(function (m, l) { return Math.max(m, cellWidth(l)); }, 0)
+    );
     check(
       results,
       'selftest.jsonParses',
@@ -255,6 +274,21 @@ export async function runSelftest(opts, tIn) {
     const g = scoreCandidate(genuine[0], { referenceFingerprint: genuine[0].fingerprint256 });
     const f = scoreCandidate(forgedResult.candidates[0], {});
     check(results, 'selftest.scoring', g.score > f.score, 'genuine=' + g.score + ' forged=' + f.score);
+
+    // 7. The remembered interface language round-trips through .env without disturbing
+    //    anything else the file already holds. This is what stops the language prompt from
+    //    becoming a per-run question.
+    const tmpEnv = path.join(FIXTURES, 'tmp-' + Date.now() + '.env');
+    try {
+      fs.writeFileSync(tmpEnv, '# keep me\nOTHER=1\n', 'utf8');
+      const wrote = writeEnvSetting(tmpEnv, 'SNI_RECON_LANG', 'ru');
+      const read = readEnvFile(tmpEnv);
+      check(results, 'selftest.envLangRoundTrip', wrote && read.SNI_RECON_LANG === 'ru', 'value=' + read.SNI_RECON_LANG);
+      check(results, 'selftest.envLangPreserves', read.OTHER === '1' && /# keep me/.test(fs.readFileSync(tmpEnv, 'utf8')), 'unrelated lines intact');
+      check(results, 'selftest.envMissingIsEmpty', Object.keys(readEnvFile(path.join(FIXTURES, 'nope-' + Date.now() + '.env'))).length === 0, 'missing file is not an error');
+    } finally {
+      try { fs.unlinkSync(tmpEnv); } catch (e) { /* already gone */ }
+    }
   } finally {
     for (const l of listeners) {
       await new Promise(function (res) {

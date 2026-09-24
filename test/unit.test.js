@@ -620,7 +620,7 @@ test('no rendered line exceeds the terminal width', function () {
   }
 });
 
-test('a short terminal still shows the newest candidates', function () {
+test('a short terminal follows the newest candidates while the scan runs', function () {
   const chunks = driveTui('en', { columns: 100, rows: 20 }, function (tui) {
     tui.start();
     tui.onEvent({ type: 'phase', phase: 'deep', message: msg('progress.deep', { count: 14 }), total: 14 });
@@ -630,7 +630,30 @@ test('a short terminal still shows the newest candidates', function () {
   });
   const lines = lastFrame(chunks).split('\n');
   assert.ok(lines.length <= 19, 'the frame must fit the terminal, got ' + lines.length + ' lines');
-  assert.ok(lines.join('\n').indexOf('n13.example') !== -1, 'the newest candidate must be the one kept');
+  assert.ok(lines.join('\n').indexOf('n13.example') !== -1, 'the newest candidate must stay in view');
+  assert.ok(lines.join('\n').indexOf('n0.example') === -1, 'the oldest rows must scroll out, not push the frame off');
+});
+
+test('navigating the table stops following the tail and shows the selected row', function () {
+  const { createTui } = tuiModule;
+  const chunks = withFakeTty({ columns: 100, rows: 20 }, function () {
+    const tui = createTui({ targets: [{ address: '203.0.113.7', port: 443 }], tty: true, t: localizer('en'), color: false });
+    try {
+      tui.start();
+      for (let i = 0; i < 14; i++) {
+        tui.addCandidate({ name: 'n' + i + '.example', leaf: { cn: 'n' + i + '.example' }, verified: { ok: true, anchored: true }, forward: { attempted: true, identityMatch: true }, score: 10 + i, stability: { latencyMs: { median: 12 } } });
+      }
+      for (let i = 0; i < 6; i++) tui.handleKey('', { name: 'up' });
+      return tui;
+    } finally {
+      tui.stop();
+    }
+  });
+  const frame = lastFrame(chunks);
+  // The cursor row is marked with U+25B8; the selected candidate must be on screen and
+  // marked, which is the whole point of turning follow off.
+  assert.ok(/\u25b8 +\d+ n7\.example/.test(frame), 'the selected row must be marked: ' + JSON.stringify(frame.split('\n').slice(-8)));
+  assert.ok(frame.indexOf('n13.example') !== -1, 'the tail is still within one page of the selection');
 });
 
 test('createTui degrades to plain progress when not a TTY', async function () {
@@ -668,6 +691,59 @@ test('createTui degrades to plain progress when not a TTY', async function () {
   const text = written.join('');
   assert.ok(/\p{Script=Cyrillic}/u.test(text), 'non-interactive progress must be localised');
   assert.ok(text.indexOf('5/20') !== -1, 'expected plain progress for the discovery milestone');
+});
+
+test('the language prompt lists every locale against a key that actually selects it', async function () {
+  const { createTui } = tuiModule;
+  // The digit printed against a row must be the digit that selects it: an off-by-one here
+  // silently gives the user the language they did not ask for, which is exactly the bug
+  // this test was written after.
+  assert.deepEqual(LOCALES, ['en', 'ru']);
+  for (const c of [
+    { press: '1', expect: 'en' },
+    { press: '2', expect: 'ru' },
+    { press: 'r', expect: 'ru' },
+    { press: 'e', expect: 'en' }
+  ]) {
+    let answer = null;
+    withFakeTty({ columns: 100, rows: 30 }, function () {
+      const tui = createTui({ targets: [{ address: '203.0.113.7', port: 443 }], tty: true, t: localizer('en'), color: false });
+      try {
+        tui.start();
+        tui.promptLocale('en').then(function (a) { answer = a; });
+        tui.handleKey(c.press, { name: c.press });
+      } finally {
+        tui.stop();
+      }
+    });
+    await new Promise(function (res) { setImmediate(res); });
+    assert.equal(answer, c.expect, 'key "' + c.press + '" must select ' + c.expect);
+  }
+});
+
+test('the prompt numbers the rows it can actually be answered with', function () {
+  const { createTui } = tuiModule;
+  const chunks = withFakeTty({ columns: 100, rows: 30 }, function () {
+    const tui = createTui({ targets: [{ address: '203.0.113.7', port: 443 }], tty: true, t: localizer('en'), color: false });
+    try {
+      tui.start();
+      tui.promptLocale('en');
+    } finally {
+      tui.stop();
+    }
+  });
+  const frame = lastFrame(chunks);
+  assert.ok(/1\s+English/.test(frame), 'the first row must be numbered 1: ' + JSON.stringify(frame.split('\n').slice(-6)));
+  assert.ok(/2\s+\S*Русск/.test(frame), 'the second row must be numbered 2');
+});
+
+test('the report names the language it was rendered in, and switching it changes the prose', function () {
+  const result = sampleResult();
+  const en = renderText(result, localizer('en'), { width: 90 });
+  const ru = renderText(result, localizer('ru'), { width: 90 });
+  assert.notEqual(en, ru);
+  assert.ok(/\p{Script=Cyrillic}/u.test(ru));
+  assert.ok(!/\p{Script=Cyrillic}/u.test(en), 'the English report must not contain Cyrillic');
 });
 
 test('utility helpers behave', function () {

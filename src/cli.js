@@ -7,6 +7,10 @@ import { listCandidates } from './candidates.js';
 import { localizer, localeFromEnv, normalizeLocale, LOCALES, DEFAULT_LOCALE, localeList } from './i18n/index.js';
 import { renderMsg, renderList } from './messages.js';
 import { redactOperatorDetails } from './redact.js';
+import { readEnvFile, writeEnvSetting } from './util.js';
+
+/** Key under which the chosen interface language is remembered. */
+export const LANG_ENV_KEY = 'SNI_RECON_LANG';
 
 /** Help text, assembled at call time so it can be translated. */
 function helpText(t) {
@@ -42,7 +46,8 @@ function helpText(t) {
     '  --no-operator-details  ' + t('help.optNoOperatorDetails'),
     '  --tui / --no-tui       ' + t('help.optTui'),
     '  -L, --lang <code>      ' + t('help.optLang', { list: localeList() }),
-    '  --format <md|json|text>  ' + t('help.optFormat'),
+    '  --width <n>            ' + t('help.optWidth'),
+    '  --format <text|md|json>  ' + t('help.optFormat'),
     '  --json                 ' + t('help.optJson'),
     '  --out <file|->         ' + t('help.optOut'),
     '  --list-candidates      ' + t('help.optListCandidates'),
@@ -79,7 +84,9 @@ function parseArgs(argv) {
     serverNames: [],
     candidates: [],
     assets: [],
-    format: 'md',
+    // Plain text is the default because it is the reading format: framed, column-aligned
+    // and wrapped to the terminal. Markdown is still one flag away for pasting elsewhere.
+    format: 'text',
     out: null,
     verbose: false,
     quiet: false,
@@ -120,6 +127,7 @@ function parseArgs(argv) {
       case '--concurrency': opts.concurrency = Number(need(i, a)); i++; break;
       case '--repeat': opts.repeat = Number(need(i, a)); i++; break;
       case '--max-deep': opts.maxDeep = Number(need(i, a)); i++; break;
+      case '--width': opts.width = Number(need(i, a)); i++; break;
       case '--format': opts.format = need(i, a); i++; break;
       case '--json': opts.format = 'json'; break;
       case '--out': opts.out = need(i, a); i++; break;
@@ -160,22 +168,42 @@ function writeOut(target, text, t) {
   process.stderr.write('[sni-recon] ' + t('progress.wrote', { path: target }) + '\n');
 }
 
+/** The width the report should be laid out to. */
+function reportWidth(optWidth) {
+  if (optWidth && Number.isFinite(optWidth) && optWidth >= 40) return Math.floor(optWidth);
+  const cols = process.stdout.columns || 0;
+  if (cols >= 40) return Math.min(cols, 120);
+  return 96;
+}
+
 export async function main(argv) {
-  // Locale: explicit flag, then the environment, then English.
-  const early = prescanLocale(argv) || localeFromEnv(process.env);
+  // Locale resolution has four sources, in order of authority:
+  //   1. --lang on the command line (never prompts)
+  //   2. SNI_RECON_LANG in the environment
+  //   3. SNI_RECON_LANG in ./.env, written by a previous interactive run
+  //   4. an interactive prompt, whose answer is saved back to ./.env
+  // The .env file is what makes the prompt a one-time question instead of a per-run tax.
+  const envFile = path.resolve('.env');
+  const fileSettings = readEnvFile(envFile);
+  const savedLocale = normalizeLocale(fileSettings[LANG_ENV_KEY]);
+  const envLocale = normalizeLocale(process.env[LANG_ENV_KEY]);
+  const explicit = prescanLocale(argv) || envLocale || savedLocale;
+  const fallback = envLocale || savedLocale || localeFromEnv(process.env);
+
   let opts;
   try {
     opts = parseArgs(argv);
   } catch (e) {
-    const t = localizer(early);
+    const t = localizer(explicit || fallback);
     process.stderr.write(t('cli.error') + ': ' + e.message + '\n\n' + helpText(t) + '\n');
     return 2;
   }
-  const locale = (opts.lang && normalizeLocale(opts.lang)) || early || DEFAULT_LOCALE;
-  const t = localizer(locale);
-  if (opts.lang && !normalizeLocale(opts.lang) && LOCALES.indexOf(String(opts.lang).toLowerCase().split('-')[0]) === -1) {
+  if (opts.lang && !normalizeLocale(opts.lang)) {
+    const t = localizer(explicit || fallback);
     process.stderr.write('[sni-recon] ' + t('cli.unknownLocale', { lang: opts.lang, list: LOCALES.join(', ') }) + '\n');
   }
+  let locale = explicit || null;
+  let t = localizer(locale || fallback);
 
   if (opts.help) {
     process.stdout.write(helpText(t) + '\n');
@@ -189,18 +217,42 @@ export async function main(argv) {
     process.stdout.write(listCandidates() + '\n');
     return 0;
   }
+
+  const nodes = opts.targets.length ? opts.targets.map(parseTarget) : [];
+  const wantTui = opts.tui !== undefined ? opts.tui : !opts.quiet && process.stdout.isTTY;
+  let tui = null;
+
+  if (wantTui && nodes.length) {
+    const { createTui } = await import('./tui.js');
+    tui = createTui({ targets: nodes, color: !process.env.NO_COLOR, t: t, locale: locale || fallback });
+    tui.start();
+    // Ask only when nothing already answered the question, and only on a real terminal.
+    if (!locale) {
+      const answer = await tui.promptLocale(fallback);
+      locale = answer || fallback;
+      t = localizer(locale);
+      tui.setLocale(locale);
+      // Persist so the question is asked once per machine, not once per run. A failure to
+      // write is reported and ignored: an unwritable directory must not abort a scan.
+      if (writeEnvSetting(envFile, LANG_ENV_KEY, locale)) {
+        process.stderr.write('[sni-recon] ' + t('lang.saved', { path: envFile }) + '\n');
+      }
+    } else {
+      tui.setLocale(locale);
+    }
+  }
+  locale = locale || fallback;
+
   if (opts.command === 'selftest') {
     const mod = await import('./selftest.js');
+    if (tui) tui.stop();
     return mod.runSelftest(opts, t);
   }
-  if (!opts.targets.length) {
+  if (!nodes.length) {
+    if (tui) tui.stop();
     process.stderr.write(helpText(t) + '\n');
     return 2;
   }
-
-  const nodes = opts.targets.map(parseTarget);
-  const wantTui = opts.tui !== undefined ? opts.tui : !opts.quiet && process.stdout.isTTY;
-  let tui = null;
 
   const runOpts = {
     port: opts.port,
@@ -219,12 +271,6 @@ export async function main(argv) {
     hoster: opts.hoster,
     verbose: opts.verbose && !opts.quiet
   };
-
-  if (wantTui) {
-    const { createTui } = await import('./tui.js');
-    tui = createTui({ targets: nodes, color: !process.env.NO_COLOR, t: t, locale: locale });
-    tui.start();
-  }
 
   const onEvent = function (evt) {
     if (!tui) return;
@@ -257,12 +303,13 @@ export async function main(argv) {
   // Redaction runs after analysis and before rendering, so it can never change a verdict.
   if (opts.redactOperator) payload = applyRedaction(payload);
 
-  const text = render(payload, opts.format, t);
+  const width = reportWidth(opts.width);
+  const text = render(payload, opts.format, t, { width: width });
   const multi = nodes.length > 1;
 
   if (opts.out === null) {
     if (multi && opts.format !== 'json') {
-      for (const r of payload.nodes) writeOut(defaultOutPath(r, opts.format, locale), render(r, opts.format, t), t);
+      for (const r of payload.nodes) writeOut(defaultOutPath(r, opts.format, locale), render(r, opts.format, t, { width: width }), t);
       process.stdout.write(textSummary(payload, t) + '\n');
     } else {
       process.stdout.write(text + (text.endsWith('\n') ? '' : '\n'));
@@ -326,3 +373,4 @@ function textSummary(payload, t) {
   }
   return out.join('\n');
 }
+
