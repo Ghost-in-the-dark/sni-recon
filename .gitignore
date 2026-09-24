@@ -1,0 +1,11 @@
+node_modules/
+npm-debug.log*
+test/fixtures/*.pem
+out/
+*.local.json
+scan*.csv
+scan*.log
+probe*/
+SNI-REPORT*.md
+.dshwolf/
+.DS_Store

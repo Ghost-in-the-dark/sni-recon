@@ -1,0 +1,46 @@
+{
+  "name": "sni-recon",
+  "version": "1.0.0",
+  "description": "Recon tool for TLS nodes used as Reality/VLESS SNI masks: whitelist detection, certificate genuineness, and transparent-forward verification.",
+  "type": "module",
+  "bin": {
+    "sni-recon": "./bin/sni-recon.js"
+  },
+  "main": "./src/analyze.js",
+  "exports": {
+    ".": "./src/analyze.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "pretest": "bash test/fixtures/generate.sh",
+    "test": "node --test test/unit.test.js",
+    "posttest": "node bin/sni-recon.js selftest",
+    "selftest": "bash test/fixtures/generate.sh && node bin/sni-recon.js selftest",
+    "fixtures": "bash test/fixtures/generate.sh"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "tls",
+    "sni",
+    "reality",
+    "vless",
+    "xray",
+    "censorship",
+    "gfw",
+    "certificate",
+    "probe"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ghost-in-the-dark/sni-recon.git"
+  },
+  "dependencies": {}
+}
