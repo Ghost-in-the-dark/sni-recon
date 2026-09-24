@@ -11,7 +11,7 @@ import { pad, padL, clip, shortFp } from './util.js';
 import { localizer, DEFAULT_LOCALE } from './i18n/index.js';
 import { renderMsg, renderList } from './messages.js';
 
-export const VERSION = '1.1.0';
+export const VERSION = '1.1.1';
 
 const FENCE = String.fromCharCode(96).repeat(3);
 const TICK = String.fromCharCode(96);

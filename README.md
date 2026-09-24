@@ -62,7 +62,28 @@ A full run, interactive UI and Markdown report:
 sni-recon 203.0.113.7
 ```
 
-The interface draws a live frame in the terminal: operator, progress through the whitelist, and each candidate as its certificate and forwarding are resolved. Press `q` to detach the UI — the scan keeps running and the report is still written.
+### The interactive frame
+
+The interface draws a live frame: the operator, progress through the whitelist, and each candidate as its certificate and forwarding are resolved.
+
+```
+┌ sni-recon · SNI cover analysis ────────────────────────────────────────────────┐
+│ target    203.0.113.7:443                                                   12s │
+│ operator  AS64500 EXAMPLE HOSTING LTD · Example City, ZZ  [datacenter]          │
+│ phase     verifying 3 accepted names                                            │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+ whitelist  ██████████████████████░░░░░░░░░░░░░░░░░░░░░░  41/120 probed, 3 accepted
+
+   candidate               presented as            certificate forward      score  ms
+   www.example.com         www.example.com         genuine     identical       90  12
+   other.example           www.example.com         lookalike   failed         -40
+   api.example             api.example             genuine     comparable      30   5
+
+ q detach UI (scan continues) · ctrl-c abort
+```
+
+Press `q` to detach — the scan keeps running and the report is still written. Below about 78 columns the table drops to names and verdicts rather than wrapping; in a short terminal the *newest* candidates are the ones kept, and the header, footer and recommendation always stay on screen. When stdout is not a terminal (a pipe, a redirect, CI) the frame degrades to line-by-line progress on stderr and the report still goes to stdout untouched.
 
 ### Language
 
@@ -287,6 +308,8 @@ sni-recon selftest # end-to-end against local fake masking nodes
 ```
 
 The self test stands up three loopback listeners — one presenting a genuine certificate, one minting a forged one, one serving a catch-all — and asserts the verdicts, the scoring order, per-locale rendering, redaction, and the absence of raw keys in output. Hoster fixtures in the tests are fictional (`AS64500 EXAMPLE HOSTING LTD`); a guard test fails the build if a real provider's identity ever appears in the repository.
+
+The unit suite also drives the interactive frame through a fake TTY: it asserts that the first draw does not throw, that every event type renders, that no line exceeds the terminal width at 60/80/120/160 columns, and that a short terminal still shows the newest candidates. That harness exists because the crash-free path was the *non-interactive* one — a render bug could ship without a single test noticing.
 
 ---
 

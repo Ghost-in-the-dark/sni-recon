@@ -475,6 +475,164 @@ test('verifyChain accepts a self-signed certificate for its own name, but still 
 
 // --- interface -------------------------------------------------------------
 
+// A headless harness for the TTY path. Without one this file only ever exercised the
+// non-TTY branch, which renders no frames at all — and a crash that fired on the very
+// first redraw shipped in a release because of it.
+function withFakeTty(opts, body) {
+  const columns = (opts && opts.columns) || 120;
+  const rows = (opts && opts.rows) || 40;
+  const saved = {
+    write: process.stdout.write,
+    cols: Object.getOwnPropertyDescriptor(process.stdout, 'columns'),
+    rows: Object.getOwnPropertyDescriptor(process.stdout, 'rows')
+  };
+  const chunks = [];
+  process.stdout.write = function (c) {
+    chunks.push(String(c));
+    return true;
+  };
+  Object.defineProperty(process.stdout, 'columns', { value: columns, configurable: true, writable: true });
+  Object.defineProperty(process.stdout, 'rows', { value: rows, configurable: true, writable: true });
+  try {
+    body(chunks);
+  } finally {
+    process.stdout.write = saved.write;
+    if (saved.cols) Object.defineProperty(process.stdout, 'columns', saved.cols);
+    else delete process.stdout.columns;
+    if (saved.rows) Object.defineProperty(process.stdout, 'rows', saved.rows);
+    else delete process.stdout.rows;
+  }
+  return chunks;
+}
+
+const ESC_RE = new RegExp(String.fromCharCode(27) + '\\[[0-9;]*m', 'g');
+const HOME = String.fromCharCode(27) + '[H';
+const CLEAR_DOWN = String.fromCharCode(27) + '[J';
+
+/**
+ * The last frame written, stripped of escapes and of the trailing padding each line carries.
+ * The closing newline is dropped too, so splitting this yields exactly the lines drawn.
+ */
+function lastFrame(chunks) {
+  const text = chunks.join('').split(HOME).pop().split(CLEAR_DOWN)[0];
+  const lines = text
+    .replace(ESC_RE, '')
+    .split('\n')
+    .map(function (l) { return l.replace(/ +$/, ''); });
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return lines.join('\n');
+}
+
+function driveTui(locale, ttyOpts, steps) {
+  return withFakeTty(ttyOpts, function () {
+    const { createTui } = tuiModule;
+    const tui = createTui({
+      targets: [{ address: '203.0.113.7', port: 443 }],
+      tty: true,
+      t: localizer(locale),
+      color: false
+    });
+    try {
+      steps(tui);
+    } finally {
+      tui.stop();
+    }
+  });
+}
+
+let tuiModule = null;
+test('the TUI module loads', async function () {
+  tuiModule = await import('../src/tui.js');
+  assert.equal(typeof tuiModule.createTui, 'function');
+});
+
+test('the TUI draws its first frame without crashing', function () {
+  // Regression: a local binding named `t` shadowed the translator in headerLines, so every
+  // redraw threw "t is not a function". start() draws a frame immediately, so the first
+  // call was already fatal.
+  let threw = null;
+  const chunks = driveTui('ru', { columns: 100, rows: 30 }, function (tui) {
+    try {
+      tui.start();
+    } catch (e) {
+      threw = e;
+    }
+  });
+  assert.equal(threw, null, 'start() must draw a frame: ' + (threw && threw.message));
+  const frame = lastFrame(chunks);
+  assert.ok(/\p{Script=Cyrillic}/u.test(frame), 'the frame must be localised');
+  assert.ok(frame.indexOf('203.0.113.7:443') !== -1, 'the target must appear in the header');
+});
+
+test('every TUI event renders a frame', function () {
+  const chunks = driveTui('en', { columns: 100, rows: 40 }, function (tui) {
+    tui.start();
+    tui.onEvent({ type: 'phase', phase: 'discovery', message: msg('progress.discovery', { count: 120 }), total: 120 });
+    tui.onEvent({ type: 'discovery', done: 40, total: 120, name: 'a.example', accepted: true });
+    tui.onEvent({ type: 'discovery', done: 41, total: 120, name: 'b.example', accepted: false });
+    tui.setHoster({ ok: true, asn: 'AS64500', org: 'EXAMPLE HOSTING LTD', city: 'Example City', countryCode: 'ZZ', hosting: true });
+    tui.setHoster({ ok: false });
+    tui.onEvent({ type: 'phase', phase: 'deep', message: msg('progress.deep', { count: 3 }), total: 3 });
+    tui.onEvent({ type: 'deep-start', name: 'a.example', index: 1, total: 3 });
+    tui.onEvent({ type: 'deep-done', name: 'a.example', index: 1, total: 3 });
+    tui.onEvent({ type: 'unreachable', message: msg('progress.unreachableShort', { message: 'ECONNREFUSED' }) });
+    tui.addCandidate({ name: 'a.example' });
+    tui.addCandidate({ name: 'b.example', leaf: { cn: 'other.example' }, verified: { ok: false, anchored: false }, forward: { attempted: true, error: 'timeout' }, score: -40 });
+    tui.setTarget(null, 0);
+    tui.setTarget({ address: '203.0.113.8', port: 443 }, 0);
+    tui.finish({
+      reachable: true,
+      node: { address: '203.0.113.8', port: 443 },
+      best: { name: 'b.example', score: 62, grade: 'good', dest: 'b.example:443' },
+      masking: { masking: true, method: 'transparent-forward', confidence: 'medium' },
+      summary: { notes: [msg('note.weakCover')] },
+      candidates: []
+    });
+  });
+  assert.ok(chunks.length > 3, 'the TUI must have written several frames');
+  const frame = lastFrame(chunks);
+  assert.ok(frame.indexOf('b.example') !== -1, 'the recommendation must be shown');
+  assert.ok(frame.indexOf('ECONNREFUSED') !== -1, 'notes must survive to the frame');
+});
+
+test('no rendered line exceeds the terminal width', function () {
+  // A line wider than the terminal wraps, and every later line of the frame lands one row
+  // lower than the cursor arithmetic assumes — the whole display shears.
+  for (const width of [60, 80, 120, 160]) {
+    const chunks = driveTui('ru', { columns: width, rows: 24 }, function (tui) {
+      tui.start();
+      tui.onEvent({ type: 'phase', phase: 'deep', message: msg('progress.deep', { count: 3 }), total: 3 });
+      for (let i = 0; i < 6; i++) {
+        tui.addCandidate({
+          name: 'very-long-candidate-name-' + i + '.example',
+          leaf: { cn: 'very-long-presented-name-' + i + '.example' },
+          verified: { ok: true, anchored: true },
+          forward: { attempted: true, comparable: true },
+          score: 70 - i,
+          stability: { latencyMs: { median: 12 } }
+        });
+      }
+    });
+    const lines = lastFrame(chunks).split('\n');
+    for (const line of lines) {
+      assert.ok(line.length <= width, 'line of ' + line.length + ' cells in a ' + width + '-cell terminal: ' + JSON.stringify(line));
+    }
+  }
+});
+
+test('a short terminal still shows the newest candidates', function () {
+  const chunks = driveTui('en', { columns: 100, rows: 20 }, function (tui) {
+    tui.start();
+    tui.onEvent({ type: 'phase', phase: 'deep', message: msg('progress.deep', { count: 14 }), total: 14 });
+    for (let i = 0; i < 14; i++) {
+      tui.addCandidate({ name: 'n' + i + '.example', leaf: { cn: 'n' + i + '.example' }, verified: { ok: true, anchored: true }, forward: { attempted: true, identityMatch: true }, score: 10 + i, stability: { latencyMs: { median: 12 } } });
+    }
+  });
+  const lines = lastFrame(chunks).split('\n');
+  assert.ok(lines.length <= 19, 'the frame must fit the terminal, got ' + lines.length + ' lines');
+  assert.ok(lines.join('\n').indexOf('n13.example') !== -1, 'the newest candidate must be the one kept');
+});
+
 test('createTui degrades to plain progress when not a TTY', async function () {
   const { createTui, createPlainProgress } = await import('../src/tui.js');
   const t = localizer('ru');
