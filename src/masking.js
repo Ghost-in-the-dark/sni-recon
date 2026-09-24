@@ -224,6 +224,9 @@ export function evaluateMasking(input) {
     verdict: verdict,
     // Message value, not a string: the renderer owns the wording and the language.
     headline: msg('masking.headline.' + verdict),
+    // The clause alone, used inside the framed section whose title it would otherwise
+    // repeat. The full sentence stays in `headline` for prose contexts.
+    reasoning: msg('masking.reasoning.' + verdict),
     weight: weight,
     positiveSignals: positive.length,
     sameOperator: sameOp,

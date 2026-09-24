@@ -16,7 +16,7 @@ import { pad, padL, clip, clipCell, padCell, padCellL, cellWidth, wrapCell, shor
 import { localizer, DEFAULT_LOCALE } from './i18n/index.js';
 import { renderMsg, renderList } from './messages.js';
 
-export const VERSION = '1.2.0';
+export const VERSION = '1.3.0';
 
 const FENCE = String.fromCharCode(96).repeat(3);
 const TICK = String.fromCharCode(96);
@@ -118,7 +118,10 @@ function formatDate(iso, locale) {
 // Shared layout primitives (cell-accurate)
 // ---------------------------------------------------------------------------
 
-const FRAME_MIN = 46;
+// The narrowest frame that can still hold the report's own tables. Exported because the
+// live TUI draws the same kind of frame and the two disagreed: the TUI floored its width
+// at 56 and the report at 46, which is one layout rule with two answers.
+export const FRAME_MIN = 46;
 const WRAP_MIN = 34;
 
 /** Box-drawing frame. Width is in cells; every row is padded to exactly the inner width. */
@@ -257,8 +260,12 @@ export function renderText(result, tIn, options) {
   const n = result.node;
   const out = [];
   out.push('');
-  out.push('sni-recon ' + VERSION + '  ' + '  ' + n.address + ':' + n.port + '  ' + DOT + '  ' +
-    formatDate(v(result.finishedAt, result.startedAt), t.locale));
+  // Wrapped, not just emitted: at --width 60 the title line measured 65 cells, which is the
+  // one line in the report that could still reach past its own frame.
+  for (const part of wrapPortable('sni-recon ' + VERSION + '  ' + n.address + ':' + n.port + '  ' + DOT + '  ' +
+    formatDate(v(result.finishedAt, result.startedAt), t.locale), W)) {
+    out.push(part);
+  }
   out.push('='.repeat(W));
 
   if (!result.reachable) {
@@ -272,6 +279,16 @@ export function renderText(result, tIn, options) {
 
   out.push('');
   out.push(...frame(t('text.summary'), summaryRows(result, t, W), W));
+
+  // Weight = the signals that actually moved the verdict. Four signals reading +1/+2/+1
+  // under a lone "total weight 4" invited the reader to add them up and find they do not
+  // sum to it, because a catch-all certificate is deliberately recorded at weight zero.
+  out.push('');
+  out.push(titleLine(t('progressSection').toUpperCase(), W));
+  for (const l of bestStability(result, t, W)) out.push('  ' + l);
+  out.push('');
+  out.push(titleLine(t('verdictSection').toUpperCase(), W));
+  for (const l of verdictLines(result, t, W)) out.push('  ' + l);
 
   const m = result.masking;
   if (m) {
@@ -337,14 +354,8 @@ function summaryRows(result, t, W) {
   const bc = (result.candidates || []).find(function (c) {
     return c.name === best.name;
   });
-  rows.push(field(t('text.certificate'), certVerdict(bc, t)));
-  rows.push(field(t('text.forward'), forwardVerdict(bc, t)));
-  if (bc && bc.stability && bc.stability.latencyMs && bc.stability.latencyMs.median != null) {
-    rows.push(field(t('verdict.medianLatency'), bc.stability.latencyMs.median + ' ms'));
-  }
-  if (bc && bc.validityDaysLeft != null) {
-    rows.push(field(t('verdict.validFor'), bc.validityDaysLeft + ' ' + t('verdict.days')));
-  }
+  // Certificate and forward verdicts, latency and validity now sit in their own sections
+  // directly below; the conclusion frame states the answer and the one line worth copying.
   rows.push('');
   // The configuration is the one line people copy, so an unusable name must not get one.
   if (!weak) {
@@ -359,17 +370,19 @@ function summaryRows(result, t, W) {
 
 function maskingSection(m, t, W) {
   const out = [];
-  const tag = m.masking ? t('masking.detected') : m.verdict === 'genuine-front' ? t('masking.notDetected') : t('masking.inconclusive');
   const rows = [];
-  rows.push(...wrapCell(tag + ' ' + DASH + ' ' + plain(renderMsg(t, m.headline, deps(t))), W - 6));
+  const tag = m.masking ? t('masking.detected') : m.verdict === 'genuine-front' ? t('masking.notDetected') : t('masking.inconclusive');
+  const claim = m.reasoning ? renderMsg(t, m.reasoning, deps(t)) : plain(renderMsg(t, m.headline, deps(t)));
+  rows.push(...wrapCell(tag + '. ' + cap(claim), W - 6));
   rows.push('');
   const labelW = labelColumn(t, ['masking.method', 'masking.confidence', 'masking.weight', 'masking.nodeOperator', 'masking.referenceOperator', 'masking.sameOperator']);
   function field(k, val) {
     return fieldLine(k, val, labelW);
   }
+  rows.push(field(t('masking.verdictKind'), cap(t('verdict.' + m.verdict))));
   rows.push(field(t('masking.method'), cap(t('method.' + m.method))));
   rows.push(field(t('masking.confidence'), t('confidence.' + m.confidence)));
-  rows.push(field(t('masking.weight'), String(m.weight)));
+  rows.push(field(t('masking.weight'), String(m.weight) + '  ' + DOT + '  ' + m.positiveSignals + ' ' + t('masking.signalsPositive')));
   if (m.nodeHoster) rows.push(field(t('masking.nodeOperator'), v(m.nodeHoster.description)));
   if (m.referenceHoster) rows.push(field(t('masking.referenceOperator'), v(m.referenceHoster.description)));
   if (m.sameOperator !== null && m.sameOperator !== undefined) {
@@ -387,6 +400,73 @@ function maskingSection(m, t, W) {
   }
   out.push(...frame(t('masking.heading'), rows, W));
   return out;
+}
+
+/**
+ * Handshake statistics for the recommended name, kept out of the conclusion frame.
+ *
+ * These are measurements, not conclusions. Left inside the verdict frame they spent five
+ * rows on numbers that qualify the answer rather than state it, and pushed the answer past
+ * the first screenful on a small terminal.
+ */
+function bestStability(result, t, W) {
+  const best = result.best;
+  if (!best) return wrapPortable(t('conclusion.noName'), W - 4);
+  const bc = (result.candidates || []).find(function (c) {
+    return c.name === best.name;
+  });
+  if (!bc) return wrapPortable(t('conclusion.noName'), W - 4);
+  const rows = [];
+  const labelW = sectionLabelWidth(t, W);
+  function field(label, value) {
+    return fieldLine(label, value, labelW);
+  }
+  const st = bc.stability;
+  if (st && st.attempts > 0) {
+    rows.push(field(t('verdict.handshakes'), st.ok + ' / ' + st.attempts));
+    rows.push(field(t('stability.label'), t(st.deterministic ? 'stability.deterministic' : 'stability.varied')));
+    if (st.latencyMs && st.latencyMs.median != null) {
+      rows.push(field(t('verdict.medianLatency'), st.latencyMs.median + ' ' + t('unit.ms')));
+      rows.push(field(t('stability.spread'), st.latencyMs.min + ' / ' + st.latencyMs.max + ' ' + t('unit.ms')));
+    }
+  }
+  if (bc.validityDaysLeft != null) {
+    rows.push(field(t('verdict.validFor'), bc.validityDaysLeft + ' ' + t('verdict.days')));
+  }
+  return rows.length ? rows : wrapPortable(t('appendix.noDeep', { code: code('--no-deep') }), W - 4);
+}
+
+/**
+ * Label column for the sections below the conclusion.
+ *
+ * 24 cells clipped the longest Russian labels — "Сертификат действителен ещё" came out as
+ * "Сертификат действителе…" — so the column is measured from the labels themselves, with a
+ * ceiling so a wordy translation cannot push the values off a narrow frame.
+ */
+function sectionLabelWidth(t, W) {
+  return Math.max(12, Math.min(34, Math.max(W - 34, labelColumn(t, [
+    'verdict.handshakes',
+    'stability.label',
+    'verdict.medianLatency',
+    'stability.spread',
+    'verdict.validFor',
+    'text.certificate',
+    'text.forward'
+  ]))));
+}
+
+/** The verdict words that stand on their own, in the order they are asked about. */
+function verdictLines(result, t, W) {
+  const best = result.best;
+  if (!best) return [];
+  const bc = (result.candidates || []).find(function (c) {
+    return c.name === best.name;
+  });
+  const rows = [];
+  const labelW = sectionLabelWidth(t, W);
+  rows.push(fieldLine(t('text.certificate'), certVerdict(bc, t), labelW));
+  rows.push(fieldLine(t('text.forward'), forwardVerdict(bc, t), labelW));
+  return rows;
 }
 
 function rankingSection(result, t, W) {
@@ -408,10 +488,11 @@ function rankingSection(result, t, W) {
     { label: t('ranking.forward'), max: 14 },
     { label: t('ranking.medianMs'), max: 12, right: true }
   ];
+  // One decimal, always: a column that renders "127" beside "134.8" reads as two different
+  // measurements rather than one rounded one.
   const ms = function (x) {
-    return x.stability && x.stability.latencyMs && x.stability.latencyMs.median != null
-      ? String(x.stability.latencyMs.median)
-      : DASH;
+    const m = x.stability && x.stability.latencyMs ? x.stability.latencyMs.median : null;
+    return m === null || m === undefined ? DASH : Number(m).toFixed(1);
   };
   // Progressive degradation as the terminal narrows. 'group' is the least informative
   // column, so it goes first; then the two verdict columns fold into one cell rather than
@@ -469,10 +550,74 @@ function rankingSection(result, t, W) {
     }
   }
   const data = rows.map(chosen.cells);
+  // A column that is empty in every row carries no information and only costs width. On a
+  // single-target scan the group column is 'n/a' ten times over.
+  const empty = chosen.columns.map(function (c, i) {
+    return data.every(function (row) {
+      const cell = row[i];
+      return cell === undefined || cell === null || String(cell).trim() === '' || String(cell) === 'n/a';
+    });
+  });
+  if (empty.some(Boolean)) {
+    for (let i = chosen.columns.length - 1; i >= 0; i--) {
+      if (!empty[i] || i === 0) continue;
+      chosen.columns.splice(i, 1);
+      for (const row of data) row.splice(i, 1);
+    }
+  }
+  // A long run of identical scores is one finding, not ten rows of evidence.
+  const collapsed = collapseTies(chosen.columns, data, t);
+  const shown = collapsed ? collapsed.rows : data;
   // Two cells are spent on the indent, so the grid has to fit in W - 2.
-  const grid = table(chosen.columns, data, W - 2);
+  const grid = table(collapsed ? collapsed.columns : chosen.columns, shown, W - 2);
   for (const l of grid) out.push('  ' + l);
+  if (collapsed && collapsed.tied) {
+    out.push('  ' + t('ranking.sameRows', { n: collapsed.tied.n, score: collapsed.tied.score }));
+  }
   return out;
+}
+
+/**
+ * Collapse a run of identical trailing rows into one line.
+ *
+ * A scan that accepts many names but trusts none of them produces eight rows of "-38" whose
+ * only shared meaning is "these were all rejected the same way". Printing all of them buries
+ * the one row that differs.
+ */
+function collapseTies(columns, data, t) {
+  if (data.length < 6) return null;
+  const scoreIdx = columns.findIndex(function (c) { return c.label === t('ranking.score'); });
+  const latIdx = columns.findIndex(function (c) { return c.label === t('ranking.medianMs'); });
+  if (scoreIdx < 0) return null;
+  // Rank (0), name (1) and latency differ for reasons that are not the score, so the run is
+  // measured over the remaining verdict columns.
+  const compare = [];
+  for (let i = 2; i < columns.length; i++) if (i !== latIdx) compare.push(i);
+  const key = function (row) {
+    return compare.map(function (i) { return String(row[i]); }).join('\u0000');
+  };
+  // The longest run of consecutive identical rows anywhere in the table, not just at the
+  // tail: the run of rejected names sits in the middle, above one that scored differently.
+  let best = { first: 0, size: 0 };
+  let i = 0;
+  while (i < data.length) {
+    let j = i + 1;
+    while (j < data.length && key(data[j]) === key(data[i])) j++;
+    if (j - i > best.size) best = { first: i, size: j - i };
+    i = j;
+  }
+  if (best.size < 3) return null;
+  // The collapsed run becomes one line *below* the grid rather than a row inside it: as a
+  // row it is clipped to the name column, which is how "ещё 5 имён…" became "ещё 5 им…".
+  const rows = data.slice(0, best.first).concat(data.slice(best.first + best.size));
+  // Ranks are positions, so they are renumbered over what is actually shown; leaving the
+  // original numbers would read as three missing rows.
+  for (let k = 0; k < rows.length; k++) rows[k] = rows[k].slice(), rows[k][0] = String(k + 1);
+  return {
+    columns: columns,
+    rows: rows,
+    tied: { n: best.size, score: String(data[best.first][scoreIdx]) }
+  };
 }
 
 function estimatedWidth(columns, rows, cellsFor) {
@@ -608,7 +753,13 @@ function detailSection(result, t, W) {
       const lines = wrapPortable(t('stability.line', {
         ok: x.stability.ok,
         attempts: x.stability.attempts,
-        determinism: t(x.stability.deterministic ? 'stability.deterministic' : 'stability.varied'),
+        determinism: t(
+          x.stability.attempts > 0
+            ? x.stability.deterministic
+              ? 'stability.deterministic'
+              : 'stability.varied'
+            : 'stability.unknown'
+        ),
         min: v(x.stability.latencyMs.min),
         median: v(x.stability.latencyMs.median),
         max: v(x.stability.latencyMs.max)
@@ -631,6 +782,10 @@ function detailSection(result, t, W) {
 function comparisonFrame(x, t, w) {
   const f = x.forward;
   if (!f || !f.attempted) return null;
+  // A frame that measured nothing is not a comparison. Rendering the grid with empty cells
+  // and "not comparable" verdicts beside a line claiming the behaviour was identical is
+  // worse than omitting it.
+  if (!f.error && (!f.via || !f.direct)) return null;
   const label = t('compare.heading') + (x.reference && x.reference.address ? ' ' + DOT + ' ' + t('compare.referenceAddress') + ': ' + x.reference.address : '');
   const rows = [];
   if (f.error) {
@@ -653,8 +808,8 @@ function comparisonFrame(x, t, w) {
         [t('compare.status'), String(f.via.status), String(f.direct.status), word(vd.status)],
         [t('compare.bytes'), f.via.bytes + ' B', f.direct.bytes + ' B', word(vd.bytes)],
         [t('compare.bodyHash'), shortHash(f.via.bodyHash), shortHash(f.direct.bodyHash), word(vd.bodyHash)],
-        [t('compare.timing'), v(f.via.ttfbMs) + ' ms', v(f.direct.ttfbMs) + ' ms', DASH],
-        [t('compare.hopCount'), String(v(f.via.hops, 0)), String(v(f.direct.hops, 0)), DASH]
+        [t('compare.timing'), v(f.via.ttfbMs) + ' ' + t('unit.ms'), v(f.direct.ttfbMs) + ' ' + t('unit.ms'), DASH],
+        [t('compare.hopCount'), String(hopCount(f.via.hops)), String(hopCount(f.direct.hops)), DASH]
       ],
       w - 4
     );
@@ -699,6 +854,11 @@ function caveatSection(t, W) {
 
 function labelIndex(i) {
   return i + ') ';
+}
+
+/** Redirect count. `hops` is the list of hops, so its length is the number, not the list. */
+function hopCount(hops) {
+  return Array.isArray(hops) ? hops.length : 0;
 }
 
 function shortHash(h) {
@@ -779,7 +939,7 @@ export function renderMarkdown(result, tIn) {
       L.push('| ' + t('verdict.handshakes') + ' | ' + bc.stability.ok + '/' + bc.stability.attempts + ' |');
     }
     if (bc && bc.stability && bc.stability.latencyMs.median != null) {
-      L.push('| ' + t('verdict.medianLatency') + ' | ' + bc.stability.latencyMs.median + ' ms |');
+      L.push('| ' + t('verdict.medianLatency') + ' | ' + bc.stability.latencyMs.median + ' ' + t('unit.ms') + ' |');
     }
     if (bc && bc.validityDaysLeft != null) {
       L.push('| ' + t('verdict.validFor') + ' | ' + bc.validityDaysLeft + ' ' + t('verdict.days') + ' |');
@@ -804,10 +964,10 @@ export function renderMarkdown(result, tIn) {
     L.push('');
     L.push('| ' + t('table.field') + ' | ' + t('table.value') + ' |');
     L.push('| --- | --- |');
-    L.push('| ' + t('masking.verdict') + ' | ' + code(cap(t('verdict.' + m.verdict))) + ' |');
+    L.push('| ' + t('masking.verdictKind') + ' | ' + code(cap(t('verdict.' + m.verdict))) + ' |');
     L.push('| ' + t('masking.method') + ' | ' + code(cap(t('method.' + m.method))) + ' |');
     L.push('| ' + t('masking.confidence') + ' | ' + t('confidence.' + m.confidence) + ' |');
-    L.push('| ' + t('masking.weight') + ' | ' + m.weight + ' |');
+    L.push('| ' + t('masking.weight') + ' | ' + m.weight + ' (' + m.positiveSignals + ' ' + t('masking.signalsPositive') + ') |');
     if (m.nodeHoster) {
       L.push('| ' + t('masking.nodeOperator') + ' | ' + v(m.nodeHoster.description) + ' |');
       L.push('| ' + t('masking.datacenter') + ' | ' + t(m.nodeHoster.hosting ? 'misc.yes' : 'misc.no') + ' |');
@@ -1003,7 +1163,13 @@ function appendPerNameDetail(L, result, t) {
         t('stability.line', {
           ok: x.stability.ok,
           attempts: x.stability.attempts,
-          determinism: t(x.stability.deterministic ? 'stability.deterministic' : 'stability.varied'),
+          determinism: t(
+            x.stability.attempts > 0
+              ? x.stability.deterministic
+                ? 'stability.deterministic'
+                : 'stability.varied'
+              : 'stability.unknown'
+          ),
           min: v(x.stability.latencyMs.min),
           median: v(x.stability.latencyMs.median),
           max: v(x.stability.latencyMs.max)
@@ -1044,8 +1210,8 @@ function appendComparison(L, x, t) {
     L.push('| ' + t('compare.status') + ' | ' + f.via.status + ' | ' + f.direct.status + ' | ' + word(vd.status) + ' |');
     L.push('| ' + t('compare.bytes') + ' | ' + f.via.bytes + ' B | ' + f.direct.bytes + ' B | ' + word(vd.bytes) + ' |');
     L.push('| ' + t('compare.bodyHash') + ' | ' + shortHash(f.via.bodyHash) + ' | ' + shortHash(f.direct.bodyHash) + ' | ' + word(vd.bodyHash) + ' |');
-    L.push('| ' + t('compare.timing') + ' | ' + v(f.via.ttfbMs) + ' ms | ' + v(f.direct.ttfbMs) + ' ms | ' + DASH + ' |');
-    L.push('| ' + t('compare.hopCount') + ' | ' + v(f.via.hops, 0) + ' | ' + v(f.direct.hops, 0) + ' | ' + DASH + ' |');
+    L.push('| ' + t('compare.timing') + ' | ' + v(f.via.ttfbMs) + ' ' + t('unit.ms') + ' | ' + v(f.direct.ttfbMs) + ' ' + t('unit.ms') + ' | ' + DASH + ' |');
+    L.push('| ' + t('compare.hopCount') + ' | ' + hopCount(f.via.hops) + ' | ' + hopCount(f.direct.hops) + ' | ' + DASH + ' |');
     if (f.leafFingerprint256 || (x.reference && x.reference.leafFingerprint256)) {
       L.push('| ' + t('compare.leaf') + ' | ' + shortHash(f.leafFingerprint256) + ' | ' + shortHash(x.reference && x.reference.leafFingerprint256) + ' | ' + word(vd.leafFingerprint) + ' |');
     }

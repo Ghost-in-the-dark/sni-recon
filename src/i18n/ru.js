@@ -73,6 +73,8 @@ export default {
   'masking.notDetected': 'Маскировка не обнаружена',
   'masking.inconclusive': 'Неоднозначно',
   'masking.verdict': 'Вердикт',
+  'masking.verdictKind': 'Вид вердикта',
+  'masking.signalsPositive': 'сигналов выше нуля',
   'masking.method': 'Способ',
   'masking.confidence': 'Достоверность',
   'masking.weight': 'Суммарный вес сигналов',
@@ -119,6 +121,24 @@ export default {
     'Маскировка не обнаружена: узел ведёт себя как собственная инфраструктура домена.',
   'masking.headline.suspicious': 'Признаки маскировки есть, но их вес ниже порога для вердикта.',
   'masking.headline.inconclusive': 'Неоднозначно: сигналов недостаточно, чтобы судить о маскировке домена.',
+  // The same verdict as a bare clause, for the framed section whose title already says
+  // what the headline repeats.
+  'masking.reasoning.identified-by-forged-certificate':
+    'узел выпускает сертификаты на домен, которым не владеет.',
+  'masking.reasoning.identified-by-transparent-forward':
+    'узел транслирует трафик домена, которым не владеет.',
+  'masking.reasoning.identified-by-generic-certificate':
+    'на любое имя отдаётся один и тот же сертификат.',
+  'masking.reasoning.identified-by-content-substitution':
+    'узел отдаёт содержимое, не совпадающее с настоящим сервисом, работая на посторонней инфраструктуре.',
+  'masking.reasoning.possible-forward-operator-unknown':
+    'узел транслирует чужой домен, но оператора определить не удалось.',
+  'masking.reasoning.genuine-front':
+    'узел ведёт себя как собственная инфраструктура домена.',
+  'masking.reasoning.suspicious':
+    'признаки есть, но их вес ниже порога для вердикта.',
+  'masking.reasoning.inconclusive':
+    'сигналов недостаточно, чтобы судить о маскировке домена.',
 
   // --- признаки маскировки -------------------------------------------------
   'evidence.untrusted-certificate-for-foreign-domain':
@@ -165,6 +185,7 @@ export default {
 
   // --- ранжирование --------------------------------------------------------
   'ranking.heading': 'Ранжирование кандидатов',
+  'ranking.sameRows': 'ещё {n} имён с той же оценкой ({score})',
   'ranking.name': 'Имя',
   'ranking.group': 'Группа',
   'ranking.score': 'Оценка',
@@ -191,6 +212,8 @@ export default {
   'compare.identical': 'идентично',
   'compare.notComparable': 'несопоставимо',
   'compare.referenceAddress': 'Адрес эталона',
+  'unit.ms': 'мс',
+
 
   // --- статические ресурсы -------------------------------------------------
   'assets.heading': 'Статические ресурсы',
@@ -202,6 +225,9 @@ export default {
     'Стабильность: {ok}/{attempts} рукопожатий, {determinism}, задержка мин/медиана/макс {min}/{median}/{max} мс.',
   'stability.deterministic': 'сертификат каждый раз один и тот же',
   'stability.varied': 'сертификат менялся',
+  'stability.unknown': 'не измерена (ни одного успешного рукопожатия)',
+  'stability.label': 'Сертификат между попытками',
+  'stability.spread': 'Задержка мин / макс',
 
   // --- различия ------------------------------------------------------------
   'differences.heading': 'Отличия от настоящего сайта',
@@ -234,6 +260,7 @@ export default {
   'score.forwardComparable': 'ответ через узел совпадает с настоящим сайтом по статусу и размеру',
   'score.forwardError': 'не удалось проверить форвард через узел',
   'score.forwardNone': 'форвард не проверялся',
+  'score.forwardNotComparable': 'форвард проверен, но несопоставим: статус, размер или хеш тела отличаются от настоящего сайта',
   'score.stableAll': 'рукопожатие удалось во всех попытках',
   'score.stableMost': 'рукопожатие в основном стабильно ({rate})',
   'score.unstable': 'рукопожатие ненадёжно ({rate})',
@@ -416,7 +443,9 @@ export default {
   'selftest.mdNoConfigForWeak': 'отчёт Markdown не предлагает конфигурацию для слабого имени',
   'selftest.detail.noConfigForWeak': 'низкая оценка не должна подаваться как рекомендация',
 // --- текстовый отчёт -----------------------------------------------------
-  'text.summary': 'Итог',
+  'text.summary': 'Заключение',
+  'progressSection': 'Ход проверки и стабильность',
+  'verdictSection': 'Вердикт',
   'text.recommend': 'Рекомендуемый SNI',
   'text.score': 'Оценка',
   'text.certificate': 'Сертификат',

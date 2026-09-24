@@ -74,6 +74,8 @@ export default {
   'masking.notDetected': 'No masking detected',
   'masking.inconclusive': 'Inconclusive',
   'masking.verdict': 'Verdict',
+  'masking.verdictKind': 'Verdict kind',
+  'masking.signalsPositive': 'signals above zero',
   'masking.method': 'Method',
   'masking.confidence': 'Confidence',
   'masking.weight': 'Signal weight',
@@ -119,6 +121,22 @@ export default {
   'masking.headline.genuine-front': 'No masking detected: the node behaves as the domain’s own infrastructure.',
   'masking.headline.suspicious': 'Masking indicators present, but below the confidence threshold for a verdict.',
   'masking.headline.inconclusive': 'Inconclusive: not enough signals to judge whether a domain is being masked.',
+  'masking.reasoning.identified-by-forged-certificate':
+    'the node issues certificates for a domain it does not own.',
+  'masking.reasoning.identified-by-transparent-forward':
+    'the node relays traffic for a domain it does not own.',
+  'masking.reasoning.identified-by-generic-certificate':
+    'the same certificate is served for every name.',
+  'masking.reasoning.identified-by-content-substitution':
+    'the node serves content that does not match the real service, from infrastructure that is not the domain’s own.',
+  'masking.reasoning.possible-forward-operator-unknown':
+    'the node relays a foreign domain, but its operator could not be determined.',
+  'masking.reasoning.genuine-front':
+    'the node behaves as the domain’s own infrastructure.',
+  'masking.reasoning.suspicious':
+    'indicators are present, but their weight is below the threshold for a verdict.',
+  'masking.reasoning.inconclusive':
+    'not enough signals to judge whether a domain is being masked.',
 
   // --- masking evidence ----------------------------------------------------
   'evidence.untrusted-certificate-for-foreign-domain':
@@ -165,6 +183,7 @@ export default {
 
   // --- ranking -------------------------------------------------------------
   'ranking.heading': 'Candidate ranking',
+  'ranking.sameRows': '{n} more names with the same score ({score})',
   'ranking.name': 'Name',
   'ranking.group': 'Group',
   'ranking.score': 'Score',
@@ -191,6 +210,11 @@ export default {
   'compare.identical': 'identical',
   'compare.notComparable': 'not comparable',
   'compare.referenceAddress': 'Reference address',
+  'unit.ms': 'ms',
+  // ASCII unit for latency in the framed terminal report. In a terminal "ms" and "мс" are
+  // both narrow, but "мс" widens every latency cell, and "ms" is unambiguous in Russian
+  // technical writing.
+
 
   // --- assets --------------------------------------------------------------
   'assets.heading': 'Static assets',
@@ -202,6 +226,9 @@ export default {
     'Stability: {ok}/{attempts} handshakes, {determinism}, latency min/median/max {min}/{median}/{max} ms.',
   'stability.deterministic': 'identical certificate each time',
   'stability.varied': 'certificate varied',
+  'stability.unknown': 'not measured (no successful handshake)',
+  'stability.label': 'Certificate across attempts',
+  'stability.spread': 'Latency min / max',
 
   // --- differences ---------------------------------------------------------
   'differences.heading': 'Differences from the real site',
@@ -234,6 +261,7 @@ export default {
   'score.forwardComparable': 'proxied response matches the real site on status and size',
   'score.forwardError': 'could not verify the forward path through the node',
   'score.forwardNone': 'forward path not verified',
+  'score.forwardNotComparable': 'forward path was checked but is not comparable: status, size or body hash differs from the real site',
   'score.stableAll': 'handshake succeeded on every attempt',
   'score.stableMost': 'handshake mostly stable ({rate})',
   'score.unstable': 'handshake unreliable ({rate})',
@@ -416,7 +444,9 @@ export default {
   'selftest.mdNoConfigForWeak': 'markdown report withholds a configuration for a weak name',
   'selftest.detail.noConfigForWeak': 'a poor score must not be presented as a recommendation',
 // --- plain-text report -----------------------------------------------
-  'text.summary': 'Summary',
+  'text.summary': 'Conclusion',
+  'progressSection': 'Progress and stability',
+  'verdictSection': 'Verdict',
   'text.recommend': 'Recommended SNI',
   'text.score': 'Score',
   'text.certificate': 'Certificate',

@@ -17,7 +17,7 @@ import { renderMarkdown, renderText, render, defaultOutPath, VERSION } from '../
 import { dedupeNames, candidatesFor, FAST_CANDIDATES, REGIONAL, groupOf } from '../src/candidates.js';
 import { parseSans, cnOf, normDn, trustedRoots, verifyChain, x509 } from '../src/cert.js';
 import { median, isBenchmarkIp, isIp, clip } from '../src/util.js';
-import { localizer, localeFromEnv, normalizeLocale, CATALOGUES, LOCALES, DEFAULT_LOCALE } from '../src/i18n/index.js';
+import { localizer, localeFromEnv, normalizeLocale, CATALOGUES, LOCALES, DEFAULT_LOCALE, LOCALE_NAMES } from '../src/i18n/index.js';
 import { msg, isMsg, renderMsg, renderList } from '../src/messages.js';
 import { redactOperatorDetails, REDACTED } from '../src/redact.js';
 
@@ -774,3 +774,129 @@ test('the published repository contains no real operator identity', function () 
   }
   assert.ok(VERSION.length > 0);
 });
+
+// --- regression tests for the design review ---------------------------------
+//
+// Each one is written against a defect that shipped: a header that labelled the wrong
+// column, two numbers that fused into one, a cell that printed "[object Object]", a verdict
+// that contradicted the evidence under it, and progress that never reached its total.
+
+test('the table header sits over the columns it labels', function () {
+  const t = localizer('ru');
+  const chunks = driveTui('ru', { columns: 100, rows: 30 }, function (tui) {
+    tui.start();
+    tui.onEvent({ type: 'phase', phase: 'deep', message: msg('progress.deep', { count: 2 }), total: 2 });
+    tui.addCandidate({
+      name: 'a.example',
+      leaf: { cn: 'other.example' },
+      verified: { ok: true, anchored: true },
+      forward: { attempted: true, identityMatch: true },
+      score: 92,
+      grade: 'excellent',
+      stability: { latencyMs: { median: 124.4 } }
+    });
+  });
+  const lines = lastFrame(chunks).split('\n');
+  const header = lines.find(function (l) { return l.indexOf(t('tui.candidate')) !== -1; });
+  const row = lines.find(function (l) { return l.indexOf('a.example') !== -1; });
+  assert.ok(header && row, 'the table must have a header and a row');
+  // The header used to indent by pad + rankW and then leave the rank cell empty, putting
+  // every heading four cells to the right of its column. Both lines now spend exactly the
+  // same six cells before the first column, so each heading must sit at offset zero.
+  assert.equal(header.indexOf(t('tui.candidate')) - row.indexOf('a.example'), 0,
+    'the name heading is not over the name column');
+  assert.equal(header.indexOf(t('tui.presentedAs')) - row.indexOf('other.example'), 0,
+    'the second column heading is not over the second column');
+  assert.equal(header.indexOf(t('tui.forward')) - row.indexOf(t('forward.identical')), 0,
+    'the forward heading is not over the forward column');
+});
+
+test('the score and the latency never fuse into one number', function () {
+  const chunks = driveTui('ru', { columns: 100, rows: 30 }, function (tui) {
+    tui.start();
+    tui.onEvent({ type: 'phase', phase: 'deep', message: msg('progress.deep', { count: 1 }), total: 1 });
+    tui.addCandidate({
+      name: 'a.example',
+      leaf: { cn: 'a.example' },
+      verified: { ok: true, anchored: true },
+      forward: { attempted: true, identityMatch: true },
+      score: 92,
+      grade: 'excellent',
+      stability: { latencyMs: { median: 138 } }
+    });
+  });
+  const row = lastFrame(chunks).split('\n').find(function (l) { return l.indexOf('a.example') !== -1; });
+  // '92' and '138' in adjacent right-aligned columns rendered as '92138' when the score
+  // column was sized from its heading rather than from the values it holds.
+  assert.ok(/92\s+138/.test(row), 'score and latency must stay apart: ' + JSON.stringify(row));
+});
+
+test('an unmeasured node is scored as unmeasured, not as perfect', function () {
+  // Zero distinct fingerprints is not determinism and an attempted-but-unmeasured forward is
+  // not an absent one; both were stated as fact about a node that never answered.
+  const score = scoreCandidate({
+    name: 'a.example',
+    verified: { ok: false, anchored: false },
+    stability: { attempts: 0, successRate: 0, deterministic: true },
+    forward: { attempted: true }
+  }, {});
+  const keys = score.components.map(function (c) { return c.reason.key; });
+  assert.ok(keys.indexOf('score.forwardNotComparable') !== -1, 'got ' + JSON.stringify(keys));
+  assert.ok(keys.indexOf('score.forwardNone') === -1, 'an attempted forward is not an absent one');
+  assert.ok(keys.indexOf('score.deterministic') === -1, 'nothing measured establishes no determinism');
+  assert.ok(keys.indexOf('score.stableAll') === -1, 'a zero success rate is not a full one');
+});
+
+test('redirect hops are counted, not printed as objects', function () {
+  const result = sampleResult();
+  result.candidates[0].forward.via.hops = [{ status: 301 }, { status: 302 }];
+  result.candidates[0].forward.direct.hops = [{}];
+  const text = renderText(result, localizer('ru'), { width: 100 });
+  assert.ok(text.indexOf('[object Object]') === -1, 'hops must render as a count');
+  assert.ok(/Редиректов\s+2\s+1/.test(text), 'expected 2 and 1 redirects');
+});
+
+test('the language prompt offers every locale, in the order the keys select', function () {
+  let prompt = null;
+  const chunks = withFakeTty({ columns: 90, rows: 24 }, function () {
+    const { createTui } = tuiModule;
+    const tui = createTui({ targets: [{ address: '203.0.113.7', port: 443 }], tty: true, t: localizer('en'), color: false });
+    prompt = tui.promptLocale('en');
+    tui.handleKey('2', { name: '2' });
+    tui.stop();
+  });
+  const frame = lastFrame(chunks);
+  for (const loc of LOCALES) {
+    assert.ok(frame.indexOf(LOCALE_NAMES[loc]) !== -1, 'the prompt must offer ' + loc);
+  }
+  return prompt.then(function (chosen) {
+    assert.equal(chosen, LOCALES[1], 'the digit 2 must select the second row printed');
+  });
+});
+
+test('colour is a per-instance switch, not a process-wide one', function () {
+  const { createTui } = tuiModule;
+  // NO_COLOR is honoured ahead of the option, so it has to be out of the way for this test;
+  // the CI running it is exactly the kind of environment that sets it.
+  const savedNoColor = process.env.NO_COLOR;
+  delete process.env.NO_COLOR;
+  const frameOf = function (color) {
+    return withFakeTty({ columns: 90, rows: 24 }, function () {
+      const tui = createTui({ targets: [{ address: '203.0.113.7', port: 443 }], tty: true, t: localizer('en'), color: color });
+      tui.start();
+      tui.stop();
+    }).join('');
+  };
+  // Colour escapes only: every frame carries cursor movement even without colour.
+  const colour = new RegExp(String.fromCharCode(27) + '\\[(3|4|9|10)[0-9]m');
+  try {
+    assert.ok(!colour.test(frameOf(false)), 'a colourless instance must emit no colour');
+    // The first instance used to blank the shared palette object, so every later one stayed
+    // colourless for the life of the process.
+    assert.ok(colour.test(frameOf(true)), 'a later colour instance must still emit colour');
+  } finally {
+    if (savedNoColor === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = savedNoColor;
+  }
+});
+

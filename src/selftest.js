@@ -238,8 +238,20 @@ export async function runSelftest(opts, tIn) {
     check(results, 'selftest.localeNoKeyLeak', leaked.length === 0, leaked.slice(0, 5).join(', ') || locales.join(', '));
 
     // The Russian report must actually be Russian, not English with a Russian header.
-    const ru = renderMarkdown(forgedResult, localizer('ru'));
-    check(results, 'selftest.ruReportIsRussian', ru.indexOf(t('masking.heading')) === -1 && /\p{Script=Cyrillic}/u.test(ru), 'Cyrillic present');
+    // The English catalogue is loaded explicitly for the comparison: `t` is the catalog
+    // under test, so comparing against its own heading is a tautology that passes on any
+    // Cyrillic text at all — which is exactly how an English heading reached the Russian
+    // report unnoticed.
+    const ruT = localizer('ru');
+    const enT = localizer('en');
+    const ru = renderMarkdown(forgedResult, ruT);
+    const leakedHeading = ru.indexOf(enT('masking.heading')) !== -1;
+    check(
+      results,
+      'selftest.ruReportIsRussian',
+      !leakedHeading && ru.indexOf(ruT('masking.heading')) !== -1,
+      'Cyrillic present'
+    );
 
     // 5. Redaction must remove operator identity without changing any verdict.
     const beforeVerdict = forgedResult.masking.verdict;

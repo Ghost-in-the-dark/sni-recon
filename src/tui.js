@@ -22,11 +22,13 @@ import {
   padCell,
   padCellL,
   cellWidth,
+  stripAnsi,
   wrapCell,
   round
 } from './util.js';
 import { localizer, DEFAULT_LOCALE, LOCALE_NAMES, LOCALES } from './i18n/index.js';
 import { renderMsg } from './messages.js';
+import { FRAME_MIN } from './report.js';
 
 const ESC = String.fromCharCode(27);
 const CSI = ESC + '[';
@@ -35,19 +37,34 @@ const SHOW_CURSOR = CSI + '?25h';
 const HOME = CSI + 'H';
 const CLEAR_DOWN = CSI + 'J';
 
-const C = {
+// Colour palette, chosen for contrast rather than for hue.
+//
+// The 16-colour ANSI table puts normal red at 2.71:1 and the 90m "bright black" that was
+// used for secondary text at 2.82:1 against a black terminal — both below the 4.5:1 that
+// WCAG 2.2 AA requires of body text. Terminals vary, but those two are the common case, so
+// secondary text and failures use the bright variants, which clear the threshold on black
+// and stay legible on the usual dark themes.
+const PALETTE = {
   reset: CSI + '0m',
   bold: CSI + '1m',
   dim: CSI + '2m',
-  red: CSI + '31m',
-  green: CSI + '32m',
-  yellow: CSI + '33m',
-  blue: CSI + '34m',
-  magenta: CSI + '35m',
-  cyan: CSI + '36m',
-  gray: CSI + '90m',
+  red: CSI + '91m',
+  green: CSI + '92m',
+  yellow: CSI + '93m',
+  blue: CSI + '94m',
+  magenta: CSI + '95m',
+  cyan: CSI + '96m',
+  gray: CSI + '37m',
   inv: CSI + '7m'
 };
+
+// The live palette the draw functions read. Switched rather than blanked in place: writing
+// empty strings into a shared object leaves every later instance in the process colourless.
+const C = {};
+function setColour(on) {
+  for (const k of Object.keys(PALETTE)) C[k] = on ? PALETTE[k] : '';
+}
+setColour(true);
 
 /** Visible width in cells, ignoring colour escapes. */
 function width(s) {
@@ -77,6 +94,19 @@ function fmtDuration(ms) {
   const s = total % 60;
   if (m < 60) return m + ':' + String(s).padStart(2, '0');
   return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+
+/**
+ * Shape as well as colour for the score class.
+ *
+ * Colour alone is not a channel: it disappears under NO_COLOR, in a pipe, and for a reader
+ * who cannot separate the hues. The cert and forward columns already pair colour with a
+ * word; the score column now pairs it with a glyph.
+ */
+function gradeMark(grade) {
+  if (grade === 'excellent' || grade === 'good') return '\u25cf';
+  if (grade === 'fair') return '\u25cb';
+  return '!';
 }
 
 function gradeColor(grade) {
@@ -163,12 +193,12 @@ export function createTui(options) {
   let resizeHandler = null;
   let promptResolve = null;
 
-  if (!colour) {
-    for (const k of Object.keys(C)) C[k] = '';
-  }
+  setColour(colour);
 
+  // Below FRAME_MIN the frame cannot hold its own table, and the report renderer gives up
+  // and wraps at the same point, so both sides agree on one floor instead of two.
   function columns() {
-    return Math.max(56, Math.min((process.stdout.columns || 100) - 1, 120));
+    return Math.max(FRAME_MIN, Math.min((process.stdout.columns || 100) - 1, 120));
   }
 
   function termRows() {
@@ -177,11 +207,15 @@ export function createTui(options) {
 
   // One column for every field label, so the values line up instead of drifting with the
   // word length of whatever language is active. The width comes from the longest label in
-  // the active locale — a fixed 10 clipped Russian "примечание" into "примечани…".
-  function labelWidth() {
+  // the active locale — a fixed 10 clipped Russian "примечание" into "примечани…" — and is
+  // capped so a wordy translation cannot push the value column off a narrow terminal.
+  const LABEL_MAX = 22;
+
+  function labelWidth(w) {
     let m = 0;
     for (const key of ['tui.target', 'tui.operator', 'tui.phase', 'tui.note']) m = Math.max(m, width(t(key)));
-    return m + 2;
+    const cap = w ? Math.max(8, Math.min(LABEL_MAX, w - 26)) : LABEL_MAX;
+    return Math.min(m, cap) + 2;
   }
 
   /** Box-drawing frame: top border bearing the title, content rows, bottom border. */
@@ -213,7 +247,7 @@ export function createTui(options) {
   /** Header rows. The elapsed clock rides the target row so the title row stays clean. */
   function headerBox(w) {
     const s = state;
-    const pad = labelWidth();
+    const pad = labelWidth(w);
     const inner = w - 4;
     const rows = [];
     const target = s.target || {};
@@ -243,12 +277,12 @@ export function createTui(options) {
   const BAR_MAX = 40;
 
   function barCells(w, tail) {
-    return Math.max(10, Math.min(BAR_MAX, w - 4 - 12 - 2 - tail));
+    return Math.max(6, Math.min(BAR_MAX, w - 4 - labelWidth(w) - 2 - tail));
   }
 
   function progressLines(w) {
     const s = state;
-    const pad = labelWidth();
+    const pad = labelWidth(w);
     const out = [];
     if (s.phase === 'discovery' || s.phase === 'controls' || s.phase === 'init') {
       const d = s.discovery;
@@ -271,11 +305,13 @@ export function createTui(options) {
 
   /** Column geometry for the candidate table, measured from the active locale's labels. */
   function tableColumns(w) {
-    const pad = labelWidth();
+    const pad = labelWidth(w);
     const certW = Math.max(width(t('tui.certificate')), width(t('tui.invalid'))) + 1;
     const fwdW = Math.max(width(t('tui.forward')), width(t('forward.comparable'))) + 1;
-    const scoreW = width(t('tui.score')) + 1;
-    const msW = width(t('tui.ms')) + 1;
+    // Scores reach -100 and a median latency is four digits under load, so the columns are
+    // measured from the data: "62" and "138" must never touch.
+    const scoreW = Math.max(width(t('tui.score')), width('-100')) + 2;
+    const msW = Math.max(width(t('tui.ms')), width('9999')) + 2;
     const rankW = 3;
     const name = Math.max(16, Math.max(width(t('tui.candidate')), width(t('tui.presentedAs'))) + 1);
     const presented = Math.max(0, w - 2 - pad - rankW - name - certW - fwdW - scoreW - msW);
@@ -306,7 +342,10 @@ export function createTui(options) {
     }
 
     const g = tableColumns(w);
-    const head = '  ' + ' '.repeat(g.pad + g.rankW) +
+    // The header is built from the same geometry the rows use. It previously indented by
+    // pad + rankW and then left the rank column empty, so every heading sat four cells to
+    // the right of the column it labelled.
+    const head = '  ' + ' '.repeat(g.rankW + 1) +
       padCell(C.gray + t('tui.candidate') + C.reset, g.name) +
       padCell(C.gray + t('tui.presentedAs') + C.reset, g.presented) +
       padCell(C.gray + t('tui.certificate') + C.reset, g.certW) +
@@ -340,12 +379,12 @@ export function createTui(options) {
         : C.gray;
       const cursor = idx === s.selected ? C.cyan + C.bold + '\u25b8 ' + C.reset : '  ';
       const line = cursor +
-        C.gray + padCellL(String(idx + 1), g.rankW) + C.reset + ' ' +
+        (idx === s.selected ? C.cyan : C.gray) + padCellL(String(idx + 1), g.rankW) + C.reset + ' ' +
         (idx === s.selected ? C.bold : '') + padCell(clipCell(c.name, g.name - 1), g.name) + C.reset +
         (same ? C.gray : C.magenta) + padCell(clipCell(presentedName, Math.max(0, g.presented - 1)), g.presented) + C.reset +
         certColor(c) + padCell(certTxt, g.certW) + C.reset +
         fwdColour + padCell(fwd, g.fwdW) + C.reset +
-        padCellL(c.score == null ? '' : String(c.score), g.scoreW) +
+        (c.score == null ? padCellL('', g.scoreW) : gradeColor(c.grade) + padCellL(gradeMark(c.grade) + ' ' + c.score, g.scoreW) + C.reset) +
         padCellL(c.stability && c.stability.latencyMs ? String(round(c.stability.latencyMs.median, 0)) : '', g.msW);
       out.push(line);
     }
@@ -369,7 +408,7 @@ export function createTui(options) {
 
   function footerBlock(w, budget) {
     const s = state;
-    const pad = labelWidth();
+    const pad = labelWidth(w);
     const out = [];
     if (s.help) {
       for (const line of helpRows(w)) out.push(line);
@@ -425,6 +464,11 @@ export function createTui(options) {
     return t('tui.detachHint');
   }
 
+  /** Height of the hint once it has wrapped to the frame width. */
+  function hintHeight(w) {
+    return Math.max(1, width(stripAnsi(hintLine())) > w - 2 ? 2 : 1);
+  }
+
   function frame() {
     if (stopped || state.detached) return;
     const w = columns();
@@ -439,7 +483,7 @@ export function createTui(options) {
       // The table gets whatever vertical space is left. Everything above and below it is
       // fixed-height, so the frame can be sized before the table is built and the newest
       // candidates are never the ones that get cut.
-      const fixed = header.length + 1 + (progress.length ? progress.length + 1 : 0) + 2 + 1 + footer.length;
+      const fixed = header.length + 1 + (progress.length ? progress.length + 1 : 0) + 2 + hintHeight(w) + footer.length;
       const tableBudget = Math.max(2, rows - 1 - fixed);
       const table = tableBlock(w, tableBudget);
       lines = header.slice();
@@ -452,7 +496,7 @@ export function createTui(options) {
       lines.push('');
       for (const l of footer) lines.push(l);
     }
-    lines.push(' ' + C.gray + hintLine() + C.reset);
+    for (const part of wrap(hintLine(), w - 2)) lines.push(' ' + C.gray + part + C.reset);
 
     let out = HOME;
     const shown = lines.slice(0, rows - 1);
@@ -534,7 +578,10 @@ export function createTui(options) {
   function addCandidate(c) {
     if (!c || c === lastCandidate) return;
     lastCandidate = c;
+    // Once a candidate arrives it is finished, whatever the event counters still say.
+    // Without this the header read "0/10" while rows were already on screen.
     state.deep.items.push(c);
+    state.deep.done = Math.max(state.deep.done, state.deep.items.length);
     if (state.deep.items.length === 1) state.selected = 0;
     if (state.follow) state.selected = state.deep.items.length - 1;
     if (tty) frame();

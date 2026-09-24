@@ -321,15 +321,25 @@ export function scoreCandidate(c, ctx) {
   if (f.identityMatch === true) add(25, msg('score.forwardIdentical'));
   else if (f.comparable) add(10, msg('score.forwardComparable'));
   else if (f.attempted && f.error) add(-10, msg('score.forwardError'));
+  // Attempted but not comparable is not the same as never attempted: the report prints the
+  // measured status, length and hash right below, and "forward not verified" under them
+  // contradicted its own evidence.
+  else if (f.attempted) add(-5, msg('score.forwardNotComparable'));
   else add(-5, msg('score.forwardNone'));
 
+  // Nothing measured is not a measurement of nothing. With no successful attempt,
+  // `successRate` is 0 and `deterministic` is vacuously true — scoring either one invents
+  // a fact about a node that never answered.
   const st = c.stability || {};
-  if (st.successRate === 1) add(5, msg('score.stableAll'));
-  else if (st.successRate >= 0.8) add(1, msg('score.stableMost', { rate: st.successRate }));
-  else add(-10, msg('score.unstable', { rate: st.successRate }));
+  const measured = st.attempts > 0;
+  if (measured) {
+    if (st.successRate === 1) add(5, msg('score.stableAll'));
+    else if (st.successRate >= 0.8) add(1, msg('score.stableMost', { rate: st.successRate }));
+    else add(-10, msg('score.unstable', { rate: st.successRate }));
 
-  if (st.deterministic) add(5, msg('score.deterministic'));
-  else add(-10, msg('score.varying'));
+    if (st.deterministic) add(5, msg('score.deterministic'));
+    else add(-10, msg('score.varying'));
+  }
 
   const d = c.validityDaysLeft;
   if (d != null && d > 180) add(5, msg('score.validLong', { days: d }));

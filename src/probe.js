@@ -215,6 +215,8 @@ export async function probeTlsStable(host, port, servername, opts) {
     successRate: oks.length / n,
     latencyMs: { min: lat.length ? Math.min.apply(null, lat) : null, median: median(lat), max: lat.length ? Math.max.apply(null, lat) : null },
     uniqueFingerprints: uniqueFps.length,
+    // One distinct fingerprint across N attempts is determinism; zero distinct
+    // fingerprints is no evidence at all, and `=== 1` reads the second as the first.
     deterministic: uniqueFps.length === 1,
     fingerprint256: uniqueFps[0] || null,
     protocols: protocols,

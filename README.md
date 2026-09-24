@@ -225,45 +225,56 @@ The console report is the primary reading surface: framed boxes, aligned fields 
 tables, wrapped to the terminal width.
 
 ```
-┌ Summary ────────────────────────────────────────────────────────────────────────┐
-│ Recommended SNI    www.samsung.com                                              │
-│ Score              62 / 100   good                                              │
-│ Certificate        genuine (chain verified)                                     │
-│ Forwarding         differs                                                      │
-│ Median handshake latency132.7 ms                                                │
+┌ Conclusion ─────────────────────────────────────────────────────────────────────┐
+│ Recommended SNI               www.samsung.com                                   │
+│ Score                         62 / 100   good                                   │
 │                                                                                 │
 │ Configuration: "serverNames": ["www.samsung.com"], "dest": "www.samsung.com:443"│
 └─────────────────────────────────────────────────────────────────────────────────┘
 
+▸ PROGRESS AND STABILITY ─────────────────────────────────────────────────────────
+  Handshake success                 5 / 5
+  Certificate across attempts       identical certificate each time
+  Median handshake latency          132.7 ms
+  Latency min / max                 124.7 / 148.6 ms
+  Certificate valid for             141 days
+
+▸ VERDICT ────────────────────────────────────────────────────────────────────────
+  Certificate                       genuine (chain verified)
+  Forwarding                        differs
+
 ┌ Hoster-level domain masking ────────────────────────────────────────────────────┐
-│ Inconclusive — Possible domain masking: the node relays for another domain, but   │
-│ the operator could not be identified.                                            │
+│ Masking detected. The node relays traffic for a domain it does not own.          │
 │                                                                                  │
-│ Method         Transparent forward                                               │
-│ Confidence     medium                                                            │
-│ Signal weight  4                                                                 │
+│ Verdict kind    Identified by transparent forward                                 │
+│ Method          Transparent forward                                               │
+│ Confidence      medium                                                            │
+│ Signal weight   6  ·  4 signals above zero                                        │
 │                                                                                  │
 │ 0    the node serves one certificate for every name, but so does the real         │
 │      service — this is CDN edge behaviour, not masking                           │
-│ +4   the node runs on AS64500 EXAMPLE HOSTING LTD, while the real service runs    │
+│ +2   the node runs on AS64500 EXAMPLE HOSTING LTD, while the real service runs    │
 │      on AS64501 — different operators                                            │
 └──────────────────────────────────────────────────────────────────────────────────┘
 
 ▸ CANDIDATE RANKING ───────────────────────────────────────────────────────────────
-  #  Name             Group  Score  Grade   Certificate  Forward     Median ms
+   #  Name             Group  Score  Grade   Certificate  Forward     Median ms
   ────────────────────────────────────────────────────────────────────────────────
-  1  www.samsung.com  infra     62  good    genuine      differs         132.7
-  2  openai.com       ai       -38  poor    lookalike    failed            130
+   1  www.samsung.com  infra     62  good    genuine      differs         132.7
+   2  openai.com       ai       -38  poor    lookalike    failed          130.0
+  ...and 6 more names with the same score (-38)
 ```
 
 The reader is told the **answer first**:
 
-1. **Summary** — the recommended SNI, a ready-to-paste configuration and the verdicts that justify it.
-2. **Masking** — the verdict, its evidence and each signal's weight.
-3. **Candidate ranking** — every name, scored.
-4. **Notes and rejected names.**
-5. **Appendix** — node identity, per-name detail, and a side-by-side comparison with the real site.
-6. **Method and caveats** — identical in every report, so it sits at the end.
+1. **Conclusion** — the recommended SNI, a ready-to-paste configuration, and nothing else. The score is a verdict; everything that qualifies it sits underneath.
+2. **Progress and stability** — handshake counts and latency, as measurements rather than conclusions.
+3. **Verdict** — the certificate and forward words that stand on their own.
+4. **Masking** — the verdict, its evidence and each signal's weight.
+5. **Candidate ranking** — every name, scored. A column that is empty in every row is dropped, and a run of identical rows is one line instead of ten.
+6. **Notes and rejected names.**
+7. **Appendix** — node identity, per-name detail, and a side-by-side comparison with the real site.
+8. **Method and caveats** — identical in every report, so it sits at the end.
 
 The comparison is a three-column table rather than two paragraphs the reader has to diff by eye:
 
@@ -396,6 +407,17 @@ sni-recon selftest # end-to-end against local fake masking nodes
 The self test stands up three loopback listeners — one presenting a genuine certificate, one minting a forged one, one serving a catch-all — and asserts the verdicts, the scoring order, per-locale rendering, redaction, and the absence of raw keys in output. Hoster fixtures in the tests are fictional (`AS64500 EXAMPLE HOSTING LTD`); a guard test fails the build if a real provider's identity ever appears in the repository.
 
 The unit suite also drives the interactive frame through a fake TTY: it asserts that the first draw does not throw, that every event type renders, that no line exceeds the terminal width at 60/80/120/160 columns, and that a short terminal still shows the newest candidates. That harness exists because the crash-free path was the *non-interactive* one — a render bug could ship without a single test noticing.
+
+Several tests are written directly against defects that shipped rather than against the code as it stands:
+
+| Test | Defect it pins down |
+| --- | --- |
+| table header sits over its columns | the header indented past the rank cell, so every heading labelled the column to its left |
+| score and latency never fuse | the score column was sized from its heading, so `62` and `138` rendered as `62138` |
+| unmeasured node scores as unmeasured | zero distinct fingerprints read as "deterministic", and an unattempted forward as an unverified one |
+| redirect hops are counted | `hops` is an array, and the cell printed `[object Object]` under a heading that read "Redirects" |
+| prompt order matches the keys | the digit printed against a row selected a different row |
+| colour is per instance | the first colourless instance blanked the shared palette for every later one |
 
 ---
 
